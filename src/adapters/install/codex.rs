@@ -34,6 +34,12 @@ impl HookInstallAdapter for CodexInstallAdapter {
             spec(exe, "PreToolUse", Some("Edit"), Mode::Ai, 900),
             spec(exe, "PreToolUse", Some("Write"), Mode::Ai, 900),
             spec(exe, "PermissionRequest", None, Mode::Alarm, 1800),
+            // 用户完成授权后，Codex 往往通过 PostToolUse 继续推进流程。
+            // 如果这里没有对应 Hook，alarm 会一直挂着，直到 Stop 才被覆盖。
+            spec(exe, "PostToolUse", Some("Bash"), Mode::Busy, 1800),
+            spec(exe, "PostToolUse", Some("apply_patch"), Mode::Ai, 900),
+            spec(exe, "PostToolUse", Some("Edit"), Mode::Ai, 900),
+            spec(exe, "PostToolUse", Some("Write"), Mode::Ai, 900),
             spec(exe, "Stop", None, Mode::Success, 30),
             spec(exe, "SubagentStop", None, Mode::Success, 30),
         ]

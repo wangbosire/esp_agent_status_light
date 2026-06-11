@@ -35,6 +35,16 @@ impl HookInstallAdapter for ClaudeInstallAdapter {
             spec(exe, "PreToolUse", Some("Write"), Mode::Ai, 900),
             spec(exe, "PermissionRequest", None, Mode::Alarm, 1800),
             spec(exe, "Notification", None, Mode::Alarm, 1800),
+            // Claude 用户确认后，通常会继续触发 PostToolUse。
+            // 这里补上对应 Hook，确保 alarm 能及时回到 busy/ai。
+            spec(exe, "PostToolUse", Some("Bash"), Mode::Busy, 1800),
+            spec(exe, "PostToolUse", Some("Edit"), Mode::Ai, 900),
+            spec(exe, "PostToolUse", Some("MultiEdit"), Mode::Ai, 900),
+            spec(exe, "PostToolUse", Some("Write"), Mode::Ai, 900),
+            // Claude 在某些连续工具场景下，会在单次工具完成后继续发出 PostToolBatch。
+            // 这个事件没有稳定的 tool matcher，但它明确表示“工具阶段正在继续推进”，
+            // 因此至少要把 alarm 及时推出，恢复到运行态 busy。
+            spec(exe, "PostToolBatch", None, Mode::Busy, 1800),
             spec(exe, "PermissionDenied", None, Mode::Error, 600),
             spec(exe, "PostToolUseFailure", None, Mode::Error, 600),
             spec(exe, "StopFailure", None, Mode::Error, 600),
@@ -119,4 +129,55 @@ fn dirs_home() -> PathBuf {
     std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."))
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::ports::ipc::IpcTransport;
+
+    struct TestPlatform;
+
+    impl PlatformAdapter for TestPlatform {
+        fn runtime_root(&self) -> PathBuf {
+            PathBuf::from(".")
+        }
+
+        fn default_ipc_adapter(&self, _ipc_path: &Path) -> Box<dyn IpcTransport> {
+            panic!("not used in tests");
+        }
+
+        fn quote_hook_command(&self, command: &HookCommand) -> String {
+            format!("{} {}", command.exe.display(), command.args.join(" "))
+        }
+
+        fn decorate_hook_command(&self, object: &mut Value, command: &HookCommand) {
+            object["command"] = json!(self.quote_hook_command(command));
+        }
+
+        fn spawn_background_daemon(&self, _exe: &Path) -> AppResult<()> {
+            panic!("not used in tests");
+        }
+    }
+
+    #[test]
+    fn claude_install_generates_post_tool_use_hooks_to_clear_alarm() {
+        let adapter = ClaudeInstallAdapter;
+        let specs = adapter.hook_specs(Path::new("/tmp/esp"));
+        let installed = adapter
+            .install(json!({}), &specs, "agent-status-light", &TestPlatform)
+            .expect("install should succeed");
+
+        let hooks = installed["hooks"]["PostToolUse"]
+            .as_array()
+            .expect("PostToolUse hooks should exist");
+        assert_eq!(hooks.len(), 4);
+
+        let batch_hooks = installed["hooks"]["PostToolBatch"]
+            .as_array()
+            .expect("PostToolBatch hooks should exist");
+        assert_eq!(batch_hooks.len(), 1);
+    }
 }

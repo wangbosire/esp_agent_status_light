@@ -801,6 +801,83 @@ mod tests {
         let _ = std::fs::remove_dir_all(runtime_root);
     }
 
+    #[tokio::test]
+    async fn simulated_alarm_flow_recovers_after_follow_up_hook() {
+        let runtime_root = temp_runtime_root("alarm-flow");
+        let runtime: Arc<dyn RuntimeStore> = Arc::new(FsRuntimeAdapter::new(runtime_root.clone()));
+        let log: Arc<dyn EventLog> = Arc::new(JsonlLogAdapter::new(runtime.clone()));
+        let daemon = Daemon::new(
+            runtime.clone(),
+            log.clone(),
+            Box::new(MockLightDevice::default()),
+        );
+        let registry = adapters::source::registry();
+
+        // 第一步先模拟 Claude 发起权限请求，状态应立即进入 alarm。
+        let alarm = build_hook_request(
+            &registry,
+            "claude",
+            Mode::Alarm,
+            serde_json::json!({
+                "session_id": "session-alarm-1",
+                "hook_event_name": "PermissionRequest",
+                "cwd": "/tmp/project"
+            }),
+        );
+        let response = daemon.handle(alarm).await;
+        assert!(response.ok);
+
+        let status = daemon
+            .handle(IpcRequestEnvelope::new(IpcRequestPayload::Status {
+                verbose: true,
+            }))
+            .await;
+        assert!(status.ok);
+        let data = status.data.expect("status data after alarm");
+        assert_eq!(data["effective"], serde_json::json!("alarm"));
+        assert_eq!(
+            data["sources"][0]["raw_event"],
+            serde_json::json!("PermissionRequest")
+        );
+
+        // 第二步模拟用户完成选择后，Claude 继续发出 PostToolBatch。
+        // 这正是现场里最容易漏装 Hook 的恢复事件；若恢复正常，状态必须尽快离开 alarm。
+        let resume = build_hook_request(
+            &registry,
+            "claude",
+            Mode::Busy,
+            serde_json::json!({
+                "session_id": "session-alarm-1",
+                "hook_event_name": "PostToolBatch",
+                "cwd": "/tmp/project"
+            }),
+        );
+        let response = daemon.handle(resume).await;
+        assert!(response.ok);
+
+        let status = daemon
+            .handle(IpcRequestEnvelope::new(IpcRequestPayload::Status {
+                verbose: true,
+            }))
+            .await;
+        assert!(status.ok);
+        let data = status.data.expect("status data after resume");
+        assert_eq!(data["effective"], serde_json::json!("busy"));
+        assert_eq!(
+            data["sources"][0]["raw_event"],
+            serde_json::json!("PostToolBatch")
+        );
+        assert_eq!(data["sources"][0]["mode"], serde_json::json!("busy"));
+
+        let logs = log.tail(20).expect("read logs");
+        assert_eq!(
+            logs.iter().filter(|item| item.kind == "ipc_send").count(),
+            2
+        );
+
+        let _ = std::fs::remove_dir_all(runtime_root);
+    }
+
     #[test]
     fn append_log_uses_warn_level_when_error_code_present() {
         let runtime = Arc::new(TestRuntimeStore);

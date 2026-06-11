@@ -878,6 +878,57 @@ mod tests {
         let _ = std::fs::remove_dir_all(runtime_root);
     }
 
+    #[tokio::test]
+    async fn simulated_alarm_then_success_updates_effective_mode() {
+        let runtime_root = temp_runtime_root("alarm-success");
+        let runtime: Arc<dyn RuntimeStore> = Arc::new(FsRuntimeAdapter::new(runtime_root.clone()));
+        let log: Arc<dyn EventLog> = Arc::new(JsonlLogAdapter::new(runtime.clone()));
+        let daemon = Daemon::new(runtime.clone(), log, Box::new(MockLightDevice::default()));
+        let registry = adapters::source::registry();
+
+        let alarm = build_hook_request(
+            &registry,
+            "claude",
+            Mode::Alarm,
+            serde_json::json!({
+                "session_id": "session-alarm-success-1",
+                "hook_event_name": "PermissionRequest",
+                "cwd": "/tmp/project"
+            }),
+        );
+        let response = daemon.handle(alarm).await;
+        assert!(response.ok);
+
+        let success = build_hook_request(
+            &registry,
+            "claude",
+            Mode::Success,
+            serde_json::json!({
+                "session_id": "session-alarm-success-1",
+                "hook_event_name": "SessionEnd",
+                "cwd": "/tmp/project"
+            }),
+        );
+        let response = daemon.handle(success).await;
+        assert!(response.ok);
+
+        let status = daemon
+            .handle(IpcRequestEnvelope::new(IpcRequestPayload::Status {
+                verbose: true,
+            }))
+            .await;
+        assert!(status.ok);
+        let data = status.data.expect("status data after success");
+        assert_eq!(data["effective"], serde_json::json!("success"));
+        assert_eq!(
+            data["sources"][0]["raw_event"],
+            serde_json::json!("SessionEnd")
+        );
+        assert_eq!(data["sources"][0]["mode"], serde_json::json!("success"));
+
+        let _ = std::fs::remove_dir_all(runtime_root);
+    }
+
     #[test]
     fn append_log_uses_warn_level_when_error_code_present() {
         let runtime = Arc::new(TestRuntimeStore);

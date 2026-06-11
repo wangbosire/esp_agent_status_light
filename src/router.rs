@@ -172,15 +172,21 @@ impl StateRouter {
             return true;
         }
 
-        // 失败/告警态仍未过期时，不能被“同一轮 turn 的 success/demo”误盖掉。
-        if matches!(current.mode, Mode::Error | Mode::Alarm)
+        // `error` 代表已经确认的失败结果，同一轮里的 success/demo 往往只是生命周期结束事件，
+        // 不能把真实失败误刷成成功。
+        //
+        // 但 `alarm` 的语义不同：它表示“当前正在等待用户操作或授权”，并不是最终失败。
+        // 一旦用户完成选择，后续同 session 的 busy/ai/thinking/success 都应该能够及时接管；
+        // 否则就会出现日志里已经收到了 Stop/SessionEnd success，
+        // `status` 却仍然卡在 alarm 的真实现场问题。
+        if current.mode == Mode::Error
             && matches!(candidate.mode, Mode::Success | Mode::Demo)
             && same_turn_or_missing(&current.turn, &candidate.turn)
         {
             return false;
         }
 
-        // 新一轮 prompt/session start 到来时，允许 thinking 把旧失败态冲掉，表示任务已重新开始。
+        // 新一轮 prompt/session start 到来时，允许 thinking 把旧 error/alarm 冲掉，表示任务已重新开始。
         if matches!(current.mode, Mode::Error | Mode::Alarm)
             && candidate.mode == Mode::Thinking
             && (turn_changed(&current.turn, &candidate.turn)
@@ -333,6 +339,44 @@ mod tests {
             turn: Some("turn-1".into()),
         };
         assert_eq!(router.apply_send(&success, now), Mode::Error);
+    }
+
+    #[test]
+    fn success_overrides_alarm_in_same_session() {
+        let now = Utc::now();
+        let mut router = StateRouter::new();
+        let alarm = SendPayload {
+            mode: Mode::Alarm,
+            source: "claude".into(),
+            session: "abc".into(),
+            ttl: Some(1800),
+            hook_id: None,
+            raw_event: Some("PermissionRequest".into()),
+            raw_tool: None,
+            capability: Some(AgentCapability::WaitingForUser),
+            suggested_mode: Some(Mode::Alarm),
+            cwd: None,
+            // 真实 Claude 结束事件经常不带稳定 turn，这里显式覆盖现场场景。
+            turn: None,
+        };
+        router.apply_send(&alarm, now);
+
+        let success = SendPayload {
+            mode: Mode::Success,
+            source: "claude".into(),
+            session: "abc".into(),
+            ttl: Some(30),
+            hook_id: None,
+            raw_event: Some("SessionEnd".into()),
+            raw_tool: None,
+            capability: Some(AgentCapability::Succeeded),
+            suggested_mode: Some(Mode::Success),
+            cwd: None,
+            turn: None,
+        };
+        let later = now + ChronoDuration::seconds(1);
+        assert_eq!(router.apply_send(&success, later), Mode::Success);
+        assert_eq!(router.effective_mode(later), Mode::Success);
     }
 
     #[test]

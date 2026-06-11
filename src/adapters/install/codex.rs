@@ -27,7 +27,8 @@ impl HookInstallAdapter for CodexInstallAdapter {
     fn hook_specs(&self, exe: &Path) -> Vec<HookSpec> {
         // 事件与 matcher 组合严格按技术方案实现，不在这里做额外扩展。
         vec![
-            spec(exe, "SessionStart", None, Mode::Thinking, 900),
+            // 会话刚打开时先显示绿色，表示“已连通、已就绪，但尚未进入思考/执行”。
+            spec(exe, "SessionStart", None, Mode::Green, 900),
             spec(exe, "UserPromptSubmit", None, Mode::Thinking, 900),
             spec(exe, "PreToolUse", Some("Bash"), Mode::Busy, 1800),
             spec(exe, "PreToolUse", Some("apply_patch"), Mode::Ai, 900),
@@ -121,4 +122,55 @@ fn dirs_home() -> PathBuf {
     std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."))
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::ports::ipc::IpcTransport;
+
+    struct TestPlatform;
+
+    impl PlatformAdapter for TestPlatform {
+        fn runtime_root(&self) -> PathBuf {
+            PathBuf::from(".")
+        }
+
+        fn default_ipc_adapter(&self, _ipc_path: &Path) -> Box<dyn IpcTransport> {
+            panic!("not used in tests");
+        }
+
+        fn quote_hook_command(&self, command: &HookCommand) -> String {
+            format!("{} {}", command.exe.display(), command.args.join(" "))
+        }
+
+        fn decorate_hook_command(&self, object: &mut Value, command: &HookCommand) {
+            object["command"] = json!(self.quote_hook_command(command));
+        }
+
+        fn spawn_background_daemon(&self, _exe: &Path) -> AppResult<()> {
+            panic!("not used in tests");
+        }
+    }
+
+    #[test]
+    fn codex_install_generates_green_session_start_hook() {
+        let adapter = CodexInstallAdapter;
+        let specs = adapter.hook_specs(Path::new("/tmp/esp"));
+        let installed = adapter
+            .install(json!({}), &specs, "agent-status-light", &TestPlatform)
+            .expect("install should succeed");
+
+        let session_start_hooks = installed["hooks"]["SessionStart"]
+            .as_array()
+            .expect("SessionStart hooks should exist");
+        assert_eq!(
+            session_start_hooks[0]["hooks"][0]["command"],
+            json!(
+                "/tmp/esp send --mode green --source codex --session auto --ttl 900 --quiet --hook-id agent-status-light"
+            )
+        );
+    }
 }

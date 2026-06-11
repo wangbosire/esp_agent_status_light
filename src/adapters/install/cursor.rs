@@ -27,7 +27,8 @@ impl HookInstallAdapter for CursorInstallAdapter {
     fn hook_specs(&self, exe: &Path) -> Vec<HookSpec> {
         // Cursor 的 Hook schema 与 Codex/Claude 不同，因此需要独立的事件清单。
         vec![
-            spec(exe, "sessionStart", None, Mode::Thinking, 900),
+            // sessionStart 表示会话刚建立，先亮绿色表示“就绪”。
+            spec(exe, "sessionStart", None, Mode::Green, 900),
             spec(exe, "beforeSubmitPrompt", None, Mode::Thinking, 900),
             spec(exe, "preToolUse", Some("Shell"), Mode::Busy, 1800),
             spec(exe, "beforeShellExecution", None, Mode::Busy, 1800),
@@ -147,6 +148,16 @@ mod tests {
         let installed = adapter
             .install(json!({}), &specs, "agent-status-light", &TestPlatform)
             .expect("install should succeed");
+
+        let session_start_hooks = installed["hooks"]["sessionStart"]
+            .as_array()
+            .expect("sessionStart hooks should exist");
+        assert_eq!(
+            session_start_hooks[0]["command"],
+            json!(
+                "/tmp/esp send --mode green --source cursor --session auto --ttl 900 --quiet --hook-id agent-status-light"
+            )
+        );
 
         let shell_hooks = installed["hooks"]["beforeShellExecution"]
             .as_array()

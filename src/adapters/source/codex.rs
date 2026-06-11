@@ -51,7 +51,8 @@ fn map_codex_mode(
     // 这里严格编码 Codex 事件到统一能力/模式的映射，
     // 不把这些判断散落到 daemon 或 router 中。
     match raw_event.unwrap_or_default() {
-        "SessionStart" | "UserPromptSubmit" | "PreCompact" | "PostCompact" | "SubagentStart" => {
+        "SessionStart" => (AgentCapability::Idle, Some(Mode::Green)),
+        "UserPromptSubmit" | "PreCompact" | "PostCompact" | "SubagentStart" => {
             (AgentCapability::Thinking, Some(Mode::Thinking))
         }
         "PermissionRequest" => (AgentCapability::WaitingForUser, Some(Mode::Alarm)),
@@ -71,6 +72,27 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn codex_session_start_maps_to_green() {
+        let ctx = HookParseContext {
+            source: "codex".into(),
+            explicit_mode: Mode::Thinking,
+            current_dir: ".".into(),
+            ttl: None,
+        };
+        let event = CodexAdapter
+            .parse(
+                json!({
+                    "session_id": "abc",
+                    "hook_event_name": "SessionStart"
+                }),
+                &ctx,
+            )
+            .expect("codex parse should succeed");
+        assert_eq!(event.capability, AgentCapability::Idle);
+        assert_eq!(event.suggested_mode, Some(Mode::Green));
+    }
 
     #[test]
     fn codex_bash_maps_to_busy() {

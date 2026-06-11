@@ -64,8 +64,10 @@ fn map_cursor_mode(
     // Cursor 事件更细，既有 beforeShellExecution 这种显式命令执行事件，
     // 也有 afterFileEdit 这类文件编辑事件，这里统一翻译为能力与建议模式。
     match raw_event.unwrap_or_default() {
-        "sessionStart" | "beforeSubmitPrompt" | "afterAgentThought" | "subagentStart"
-        | "preCompact" => (AgentCapability::Thinking, Some(Mode::Thinking)),
+        "sessionStart" => (AgentCapability::Idle, Some(Mode::Green)),
+        "beforeSubmitPrompt" | "afterAgentThought" | "subagentStart" | "preCompact" => {
+            (AgentCapability::Thinking, Some(Mode::Thinking))
+        }
         "afterAgentResponse" | "afterFileEdit" | "afterTabFileEdit" => {
             (AgentCapability::Generating, Some(Mode::Ai))
         }
@@ -100,6 +102,27 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn cursor_session_start_maps_to_green() {
+        let ctx = HookParseContext {
+            source: "cursor".into(),
+            explicit_mode: Mode::Thinking,
+            current_dir: ".".into(),
+            ttl: None,
+        };
+        let event = CursorAdapter
+            .parse(
+                json!({
+                    "conversationId": "abc",
+                    "hookEventName": "sessionStart",
+                }),
+                &ctx,
+            )
+            .expect("cursor parse should succeed");
+        assert_eq!(event.capability, AgentCapability::Idle);
+        assert_eq!(event.suggested_mode, Some(Mode::Green));
+    }
 
     #[test]
     fn cursor_failure_maps_to_error() {

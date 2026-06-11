@@ -51,7 +51,8 @@ fn map_claude_mode(
     // Claude 的 Notification/PermissionDenied 等事件语义与其他宿主不完全相同，
     // 必须在 adapter 层单独编码，保证核心层看到的是稳定能力枚举。
     match raw_event.unwrap_or_default() {
-        "SessionStart" | "UserPromptSubmit" | "SubagentStart" | "PreCompact" | "PostCompact" => {
+        "SessionStart" => (AgentCapability::Idle, Some(Mode::Green)),
+        "UserPromptSubmit" | "SubagentStart" | "PreCompact" | "PostCompact" => {
             (AgentCapability::Thinking, Some(Mode::Thinking))
         }
         "PermissionRequest" | "Notification" => {
@@ -85,6 +86,27 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn claude_session_start_maps_to_green() {
+        let ctx = HookParseContext {
+            source: "claude".into(),
+            explicit_mode: Mode::Thinking,
+            current_dir: ".".into(),
+            ttl: None,
+        };
+        let event = ClaudeAdapter
+            .parse(
+                json!({
+                    "session_id": "abc",
+                    "hook_event_name": "SessionStart",
+                }),
+                &ctx,
+            )
+            .expect("claude parse should succeed");
+        assert_eq!(event.capability, AgentCapability::Idle);
+        assert_eq!(event.suggested_mode, Some(Mode::Green));
+    }
 
     #[test]
     fn claude_notification_maps_to_alarm() {

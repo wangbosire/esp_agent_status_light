@@ -27,7 +27,8 @@ impl HookInstallAdapter for ClaudeInstallAdapter {
     fn hook_specs(&self, exe: &Path) -> Vec<HookSpec> {
         // Claude 支持的事件相对更丰富，因此这里显式覆盖通知、失败、会话结束等场景。
         vec![
-            spec(exe, "SessionStart", None, Mode::Thinking, 900),
+            // 会话刚打开时先显示绿色，表示 Agent 会话已建立、当前处于待命状态。
+            spec(exe, "SessionStart", None, Mode::Green, 900),
             spec(exe, "UserPromptSubmit", None, Mode::Thinking, 900),
             spec(exe, "PreToolUse", Some("Bash"), Mode::Busy, 1800),
             spec(exe, "PreToolUse", Some("Edit"), Mode::Ai, 900),
@@ -169,6 +170,16 @@ mod tests {
         let installed = adapter
             .install(json!({}), &specs, "agent-status-light", &TestPlatform)
             .expect("install should succeed");
+
+        let session_start_hooks = installed["hooks"]["SessionStart"]
+            .as_array()
+            .expect("SessionStart hooks should exist");
+        assert_eq!(
+            session_start_hooks[0]["hooks"][0]["command"],
+            json!(
+                "/tmp/esp send --mode green --source claude --session auto --ttl 900 --quiet --hook-id agent-status-light"
+            )
+        );
 
         let hooks = installed["hooks"]["PostToolUse"]
             .as_array()

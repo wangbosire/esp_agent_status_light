@@ -13,6 +13,11 @@ pub trait RuntimeStore: Send + Sync {
     fn bin_dir(&self) -> PathBuf;
     /// JSONL 事件日志文件路径。
     fn events_log_path(&self) -> PathBuf;
+    /// JSONL 运行日志文件路径。
+    ///
+    /// 与 events log 不同，这份日志用于保留 daemon 的最近运行轨迹，
+    /// 便于排查“当前这轮运行里发生了什么”，实现层会负责数量裁剪。
+    fn runtime_log_path(&self) -> PathBuf;
     /// 某个安装目标对应的 manifest 路径。
     fn install_manifest_path(&self, target: &str) -> PathBuf;
     /// 平台默认 IPC 地址或路径。

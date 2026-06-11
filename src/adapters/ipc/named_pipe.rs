@@ -264,24 +264,7 @@ async fn handle_pipe_stream(
     Ok(())
 }
 
+// 测试实现拆到独立目录，避免与 Windows named pipe 传输主逻辑混写在同一个文件里。
 #[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-
-    use super::pipe_name_from_path;
-
-    #[test]
-    fn keeps_existing_named_pipe_path() {
-        let path = PathBuf::from(r"\\.\pipe\custom-agent-light");
-        assert_eq!(pipe_name_from_path(&path), r"\\.\pipe\custom-agent-light");
-    }
-
-    #[test]
-    fn derives_stable_named_pipe_name_from_regular_path() {
-        let path =
-            PathBuf::from(r"C:\Users\alice\AppData\Local\AgentStatusLight\runtime\daemon.sock");
-        let pipe_name = pipe_name_from_path(&path);
-        assert!(pipe_name.starts_with(r"\\.\pipe\esp-agent-status-light-daemon-"));
-        assert_eq!(pipe_name, pipe_name_from_path(&path));
-    }
-}
+#[path = "../../../tests/adapters/ipc/named_pipe_tests.rs"]
+mod tests;

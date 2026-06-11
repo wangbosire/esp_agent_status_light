@@ -2,11 +2,15 @@
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::model::{AppError, AppResult, LogEvent};
 use crate::ports::log::EventLog;
 use crate::ports::runtime::RuntimeStore;
+
+/// 运行日志只保留最近 3000 条，避免长期运行后单文件无限膨胀。
+const MAX_RUNTIME_LOG_ENTRIES: usize = 3000;
 
 #[derive(Clone)]
 pub struct JsonlLogAdapter {
@@ -23,16 +27,28 @@ impl JsonlLogAdapter {
 impl EventLog for JsonlLogAdapter {
     fn append(&self, event: LogEvent) -> AppResult<()> {
         self.runtime.ensure_layout()?;
-        let path = self.runtime.events_log_path();
         // 采用 JSONL 追加写入：简单、稳定，而且适合按行 tail。
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .map_err(|err| AppError::io("open events log", err))?;
         let line = serde_json::to_string(&event)
             .map_err(|err| AppError::invalid("serialize log event", err))?;
-        writeln!(file, "{line}").map_err(|err| AppError::io("append events log", err))
+        append_jsonl_line(&self.runtime.events_log_path(), &line, "events")?;
+        append_jsonl_line(&self.runtime.runtime_log_path(), &line, "runtime")?;
+        trim_jsonl_to_last_n(
+            &self.runtime.runtime_log_path(),
+            MAX_RUNTIME_LOG_ENTRIES,
+            "runtime",
+        )
+    }
+
+    fn append_runtime(&self, event: LogEvent) -> AppResult<()> {
+        self.runtime.ensure_layout()?;
+        let line = serde_json::to_string(&event)
+            .map_err(|err| AppError::invalid("serialize runtime log event", err))?;
+        append_jsonl_line(&self.runtime.runtime_log_path(), &line, "runtime")?;
+        trim_jsonl_to_last_n(
+            &self.runtime.runtime_log_path(),
+            MAX_RUNTIME_LOG_ENTRIES,
+            "runtime",
+        )
     }
 
     fn tail(&self, limit: usize) -> AppResult<Vec<LogEvent>> {
@@ -54,3 +70,31 @@ impl EventLog for JsonlLogAdapter {
         Ok(items)
     }
 }
+
+fn append_jsonl_line(path: &Path, line: &str, label: &str) -> AppResult<()> {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|err| AppError::io(&format!("open {label} log"), err))?;
+    writeln!(file, "{line}").map_err(|err| AppError::io(&format!("append {label} log"), err))
+}
+
+fn trim_jsonl_to_last_n(path: &Path, max_entries: usize, label: &str) -> AppResult<()> {
+    let raw =
+        fs::read_to_string(path).map_err(|err| AppError::io(&format!("read {label} log"), err))?;
+    let lines: Vec<&str> = raw.lines().collect();
+    if lines.len() <= max_entries {
+        return Ok(());
+    }
+
+    let start = lines.len().saturating_sub(max_entries);
+    let mut trimmed = lines[start..].join("\n");
+    trimmed.push('\n');
+    fs::write(path, trimmed).map_err(|err| AppError::io(&format!("trim {label} log"), err))
+}
+
+// 测试实现拆到独立目录，避免与 JSONL 日志写入主逻辑混写在同一个文件里。
+#[cfg(test)]
+#[path = "../../../tests/adapters/log/jsonl_tests.rs"]
+mod tests;

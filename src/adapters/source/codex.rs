@@ -67,52 +67,7 @@ fn map_codex_mode(
     }
 }
 
+// 测试实现拆到独立目录，避免与 Codex Hook 事件解析主逻辑混写在同一个文件里。
 #[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::*;
-
-    #[test]
-    fn codex_session_start_maps_to_green() {
-        let ctx = HookParseContext {
-            source: "codex".into(),
-            explicit_mode: Mode::Thinking,
-            current_dir: ".".into(),
-            ttl: None,
-        };
-        let event = CodexAdapter
-            .parse(
-                json!({
-                    "session_id": "abc",
-                    "hook_event_name": "SessionStart"
-                }),
-                &ctx,
-            )
-            .expect("codex parse should succeed");
-        assert_eq!(event.capability, AgentCapability::Idle);
-        assert_eq!(event.suggested_mode, Some(Mode::Green));
-    }
-
-    #[test]
-    fn codex_bash_maps_to_busy() {
-        let ctx = HookParseContext {
-            source: "codex".into(),
-            explicit_mode: Mode::Busy,
-            current_dir: ".".into(),
-            ttl: None,
-        };
-        let event = CodexAdapter
-            .parse(
-                json!({
-                    "session_id": "abc",
-                    "hook_event_name": "PreToolUse",
-                    "tool_name": "Bash",
-                }),
-                &ctx,
-            )
-            .expect("codex parse should succeed");
-        assert_eq!(event.capability, AgentCapability::RunningCommand);
-        assert_eq!(event.suggested_mode, Some(Mode::Busy));
-    }
-}
+#[path = "../../../tests/adapters/source/codex_tests.rs"]
+mod tests;

@@ -45,6 +45,10 @@ impl RuntimeStore for FsRuntimeAdapter {
         self.runtime_dir().join("events.log")
     }
 
+    fn runtime_log_path(&self) -> PathBuf {
+        self.runtime_dir().join("runtime.log")
+    }
+
     fn install_manifest_path(&self, target: &str) -> PathBuf {
         self.root.join(format!("config.{target}.json"))
     }

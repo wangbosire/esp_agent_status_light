@@ -187,8 +187,42 @@ impl Daemon {
 
     async fn try_connect_device(&self) -> AppResult<()> {
         // 连接能力完全委托给 device adapter，本层只关心成功或失败。
+        self.append_runtime_log(
+            "runtime_ble",
+            "attempting device connect",
+            None,
+            None,
+            None,
+            None,
+        );
         let mut device = self.device.lock().await;
-        device.connect().await.map(|_| ())
+        match device.connect().await {
+            Ok(_) => {
+                self.append_runtime_log(
+                    "runtime_ble",
+                    "device connect succeeded",
+                    None,
+                    None,
+                    None,
+                    None,
+                );
+                Ok(())
+            }
+            Err(err) => {
+                self.append_runtime_log(
+                    "runtime_ble",
+                    &format!(
+                        "device connect failed: code={}, message={}",
+                        err.code, err.message
+                    ),
+                    Some(&err.code),
+                    None,
+                    None,
+                    None,
+                );
+                Err(err)
+            }
+        }
     }
 
     async fn sync_effective_mode(&self, force_write: bool) -> AppResult<()> {
@@ -196,10 +230,29 @@ impl Daemon {
             let router = self.router.lock().await;
             router.effective_mode(Utc::now())
         };
+        self.append_runtime_log(
+            "runtime_ble",
+            &format!(
+                "sync_effective_mode started: effective={}, force_write={force_write}",
+                effective.as_str()
+            ),
+            None,
+            None,
+            None,
+            Some(effective),
+        );
 
         let mut device = self.device.lock().await;
         let health = device.health().await;
         if !health.connected {
+            self.append_runtime_log(
+                "runtime_ble",
+                "device was disconnected during sync, reconnecting before write",
+                None,
+                None,
+                None,
+                Some(effective),
+            );
             device.connect().await?;
         }
 
@@ -207,12 +260,28 @@ impl Daemon {
         // 但如果设备刚刚重连，即使 mode 没变化，也必须强制补写一次当前 effective mode。
         let mut last_applied = self.last_applied_mode.lock().await;
         if !force_write && health.connected && last_applied.is_some_and(|mode| mode == effective) {
+            self.append_runtime_log(
+                "runtime_ble",
+                "skipped BLE write because effective mode did not change",
+                None,
+                None,
+                None,
+                Some(effective),
+            );
             return Ok(());
         }
 
         device.write_mode(effective).await?;
         *last_applied = Some(effective);
         *self.last_ble_write_at.lock().await = Some(Utc::now());
+        self.append_runtime_log(
+            "runtime_ble",
+            "BLE write succeeded and last_applied_mode updated",
+            None,
+            None,
+            None,
+            Some(effective),
+        );
         Ok(())
     }
 
@@ -242,12 +311,61 @@ impl Daemon {
         })
     }
 
+    fn append_runtime_log(
+        &self,
+        kind: &str,
+        message: &str,
+        code: Option<&str>,
+        source: Option<&str>,
+        session: Option<&str>,
+        mode: Option<Mode>,
+    ) {
+        // runtime 日志用于记录链路节点，采用“尽力写入”策略；
+        // 即使日志失败，也不能影响 daemon 对外处理状态请求。
+        let _ = self.log.append_runtime(LogEvent {
+            timestamp: Utc::now(),
+            level: if code.is_some() {
+                "warn".into()
+            } else {
+                "info".into()
+            },
+            kind: kind.into(),
+            message: message.into(),
+            code: code.map(ToOwned::to_owned),
+            source: source.map(ToOwned::to_owned),
+            session: session.map(ToOwned::to_owned),
+            mode,
+        });
+    }
+
     async fn handle_send(&self, request_id: &str, payload: SendPayload) -> IpcResponseEnvelope {
+        self.append_runtime_log(
+            "runtime_ipc_send",
+            &format!(
+                "daemon received send request: request_id={request_id}, raw_event={:?}, raw_tool={:?}, turn={:?}",
+                payload.raw_event, payload.raw_tool, payload.turn
+            ),
+            None,
+            Some(&payload.source),
+            Some(&payload.session),
+            Some(payload.mode),
+        );
         let now = Utc::now();
         let effective = {
             let mut router = self.router.lock().await;
             router.apply_send(&payload, now)
         };
+        self.append_runtime_log(
+            "runtime_router",
+            &format!(
+                "router applied state and resolved effective mode={}",
+                effective.as_str()
+            ),
+            None,
+            Some(&payload.source),
+            Some(&payload.session),
+            Some(effective),
+        );
 
         let _ = self.append_log(
             "ipc_send",
@@ -259,6 +377,17 @@ impl Daemon {
         );
 
         if let Err(err) = self.sync_effective_mode(false).await {
+            self.append_runtime_log(
+                "runtime_ble",
+                &format!(
+                    "sync_effective_mode failed: code={}, message={}",
+                    err.code, err.message
+                ),
+                Some(&err.code),
+                Some(&payload.source),
+                Some(&payload.session),
+                Some(effective),
+            );
             // 路由状态已经接受成功，但 BLE 临时不可用时仍要把“已接受”告诉调用方，
             // 同时附带明确错误码，供 `--strict` 场景感知失败。
             let _ = self.append_log(
@@ -275,6 +404,15 @@ impl Daemon {
                 "queued": true,
             }));
         }
+
+        self.append_runtime_log(
+            "runtime_ipc_send",
+            "daemon completed send request successfully",
+            None,
+            Some(&payload.source),
+            Some(&payload.session),
+            Some(effective),
+        );
 
         IpcResponseEnvelope::ok(request_id.to_string(), "accepted").with_data(json!({
             "effective": effective,
@@ -353,629 +491,7 @@ impl IpcRequestHandler for Daemon {
     }
 }
 
+// 测试实现拆到独立目录，避免与 daemon 状态机和设备协同主逻辑混写在同一个文件里。
 #[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-    use std::sync::Arc;
-
-    use async_trait::async_trait;
-    use chrono::Utc;
-    use serde_json::Value;
-    use tokio::sync::Mutex;
-
-    use super::*;
-    use crate::adapters::device::mock::MockLightDevice;
-    use crate::adapters::log::jsonl::JsonlLogAdapter;
-    use crate::adapters::runtime::fs::FsRuntimeAdapter;
-    use crate::model::{AppError, DeviceInfo, InstallManifest, IpcInfo};
-    use crate::ports::log::EventLog;
-    use crate::ports::runtime::RuntimeStore;
-    use crate::ports::source::SourceAdapterRegistry;
-    use crate::router::resolve_mode;
-    use crate::{adapters, model::HookParseContext};
-
-    #[derive(Debug, Default)]
-    struct DeviceState {
-        connected: bool,
-        writes: Vec<Mode>,
-        fail_write: bool,
-    }
-
-    struct TestLightDevice {
-        state: Arc<Mutex<DeviceState>>,
-    }
-
-    #[async_trait]
-    impl LightDevice for TestLightDevice {
-        async fn connect(&mut self) -> AppResult<DeviceInfo> {
-            let mut state = self.state.lock().await;
-            state.connected = true;
-            Ok(DeviceInfo {
-                name: "test-device".into(),
-                id: "test".into(),
-            })
-        }
-
-        async fn write_mode(&mut self, mode: Mode) -> AppResult<()> {
-            let mut state = self.state.lock().await;
-            if state.fail_write {
-                return Err(AppError::new("ble_write_failed", "simulated write failure"));
-            }
-            state.writes.push(mode);
-            Ok(())
-        }
-
-        async fn read_mode(&mut self) -> AppResult<Option<Mode>> {
-            let state = self.state.lock().await;
-            Ok(state.writes.last().copied())
-        }
-
-        async fn health(&self) -> DeviceHealth {
-            let state = self.state.lock().await;
-            DeviceHealth {
-                connected: state.connected,
-                device_name: Some("test-device".into()),
-                last_error: None,
-                last_write_at: None,
-                last_mode: state.writes.last().copied(),
-            }
-        }
-    }
-
-    struct TestRuntimeStore;
-
-    impl RuntimeStore for TestRuntimeStore {
-        fn runtime_root(&self) -> PathBuf {
-            PathBuf::from("/tmp/esp-test")
-        }
-
-        fn runtime_dir(&self) -> PathBuf {
-            self.runtime_root().join("runtime")
-        }
-
-        fn bin_dir(&self) -> PathBuf {
-            self.runtime_root().join("bin")
-        }
-
-        fn events_log_path(&self) -> PathBuf {
-            self.runtime_dir().join("events.log")
-        }
-
-        fn install_manifest_path(&self, target: &str) -> PathBuf {
-            self.runtime_root().join(format!("config.{target}.json"))
-        }
-
-        fn default_ipc_path(&self) -> PathBuf {
-            self.runtime_dir().join("daemon.sock")
-        }
-
-        fn ensure_layout(&self) -> AppResult<()> {
-            Ok(())
-        }
-
-        fn read_pid(&self) -> AppResult<Option<u32>> {
-            Ok(None)
-        }
-
-        fn write_pid(&self, _pid: u32) -> AppResult<()> {
-            Ok(())
-        }
-
-        fn clear_pid(&self) -> AppResult<()> {
-            Ok(())
-        }
-
-        fn read_ipc_info(&self) -> AppResult<Option<IpcInfo>> {
-            Ok(None)
-        }
-
-        fn write_ipc_info(&self, _info: &IpcInfo) -> AppResult<()> {
-            Ok(())
-        }
-
-        fn clear_ipc_info(&self) -> AppResult<()> {
-            Ok(())
-        }
-
-        fn write_install_manifest(&self, _manifest: &InstallManifest) -> AppResult<()> {
-            Ok(())
-        }
-    }
-
-    #[derive(Default)]
-    struct TestEventLog;
-
-    impl EventLog for TestEventLog {
-        fn append(&self, _event: LogEvent) -> AppResult<()> {
-            Ok(())
-        }
-
-        fn tail(&self, _limit: usize) -> AppResult<Vec<LogEvent>> {
-            Ok(Vec::new())
-        }
-    }
-
-    fn build_daemon(device_state: Arc<Mutex<DeviceState>>) -> Arc<Daemon> {
-        Daemon::new(
-            Arc::new(TestRuntimeStore),
-            Arc::new(TestEventLog),
-            Box::new(TestLightDevice {
-                state: device_state,
-            }),
-        )
-    }
-
-    fn send_payload(mode: Mode) -> SendPayload {
-        SendPayload {
-            mode,
-            source: "codex".into(),
-            session: "session-1".into(),
-            ttl: Some(30),
-            hook_id: Some("agent-status-light".into()),
-            raw_event: None,
-            raw_tool: None,
-            capability: None,
-            suggested_mode: None,
-            cwd: None,
-            turn: None,
-        }
-    }
-
-    #[tokio::test]
-    async fn handle_send_returns_error_when_ble_write_fails() {
-        let device_state = Arc::new(Mutex::new(DeviceState {
-            connected: true,
-            writes: Vec::new(),
-            fail_write: true,
-        }));
-        let daemon = build_daemon(device_state);
-
-        let response = daemon.handle_send("req-1", send_payload(Mode::Busy)).await;
-
-        assert!(!response.ok);
-        assert_eq!(response.code.as_deref(), Some("ble_write_failed"));
-        assert_eq!(
-            response.data.as_ref().and_then(|data| data.get("accepted")),
-            Some(&json!(true))
-        );
-        assert_eq!(
-            response.data.as_ref().and_then(|data| data.get("queued")),
-            Some(&json!(true))
-        );
-    }
-
-    #[tokio::test]
-    async fn sync_effective_mode_force_write_reapplies_same_mode() {
-        let device_state = Arc::new(Mutex::new(DeviceState {
-            connected: true,
-            writes: Vec::new(),
-            fail_write: false,
-        }));
-        let daemon = build_daemon(device_state.clone());
-
-        let response = daemon.handle_send("req-2", send_payload(Mode::Ai)).await;
-        assert!(response.ok);
-
-        daemon
-            .sync_effective_mode(true)
-            .await
-            .expect("force write should succeed");
-
-        let state = device_state.lock().await;
-        assert_eq!(state.writes, vec![Mode::Ai, Mode::Ai]);
-    }
-
-    #[tokio::test]
-    async fn hook_state_flow_uses_latest_state_within_same_session() {
-        let device_state = Arc::new(Mutex::new(DeviceState {
-            connected: true,
-            writes: Vec::new(),
-            fail_write: false,
-        }));
-        let daemon = build_daemon(device_state.clone());
-
-        let busy = SendPayload {
-            mode: Mode::Busy,
-            source: "cursor".into(),
-            session: "conv-1".into(),
-            ttl: Some(1800),
-            hook_id: Some("agent-status-light".into()),
-            raw_event: Some("beforeShellExecution".into()),
-            raw_tool: Some("Shell".into()),
-            capability: Some(crate::model::AgentCapability::RunningCommand),
-            suggested_mode: Some(Mode::Busy),
-            cwd: Some("/tmp/project".into()),
-            turn: Some("turn-1".into()),
-        };
-        let response = daemon.handle_send("flow-1", busy).await;
-        assert!(response.ok);
-
-        let status = daemon.handle_status("status-1", true).await;
-        let status_json = status.data.expect("status should contain data");
-        assert_eq!(status_json["effective"], json!("busy"));
-        assert_eq!(
-            status_json["sources"][0]["raw_event"],
-            json!("beforeShellExecution")
-        );
-        assert_eq!(status_json["sources"][0]["turn"], json!("turn-1"));
-
-        let error = SendPayload {
-            mode: Mode::Error,
-            source: "cursor".into(),
-            session: "conv-1".into(),
-            ttl: Some(600),
-            hook_id: Some("agent-status-light".into()),
-            raw_event: Some("postToolUseFailure".into()),
-            raw_tool: Some("Shell".into()),
-            capability: Some(crate::model::AgentCapability::Failed),
-            suggested_mode: Some(Mode::Error),
-            cwd: Some("/tmp/project".into()),
-            turn: Some("turn-1".into()),
-        };
-        let response = daemon.handle_send("flow-2", error).await;
-        assert!(response.ok);
-
-        let same_turn_success = SendPayload {
-            mode: Mode::Success,
-            source: "cursor".into(),
-            session: "conv-1".into(),
-            ttl: Some(30),
-            hook_id: Some("agent-status-light".into()),
-            raw_event: Some("stop".into()),
-            raw_tool: None,
-            capability: Some(crate::model::AgentCapability::Succeeded),
-            suggested_mode: Some(Mode::Success),
-            cwd: Some("/tmp/project".into()),
-            turn: Some("turn-1".into()),
-        };
-        let response = daemon.handle_send("flow-3", same_turn_success).await;
-        assert!(response.ok);
-
-        let status = daemon.handle_status("status-2", true).await;
-        let status_json = status.data.expect("status should contain data");
-        // 按最新规则：同一 session 内始终使用最后一次状态。
-        assert_eq!(status_json["effective"], json!("success"));
-        assert_eq!(status_json["sources"][0]["mode"], json!("success"));
-
-        let new_round_thinking = SendPayload {
-            mode: Mode::Thinking,
-            source: "cursor".into(),
-            session: "conv-1".into(),
-            ttl: Some(900),
-            hook_id: Some("agent-status-light".into()),
-            raw_event: Some("beforeSubmitPrompt".into()),
-            raw_tool: None,
-            capability: Some(crate::model::AgentCapability::Thinking),
-            suggested_mode: Some(Mode::Thinking),
-            cwd: Some("/tmp/project".into()),
-            turn: Some("turn-2".into()),
-        };
-        let response = daemon.handle_send("flow-4", new_round_thinking).await;
-        assert!(response.ok);
-
-        let status = daemon.handle_status("status-3", true).await;
-        let status_json = status.data.expect("status should contain data");
-        // 后续新的 thinking 同样应继续覆盖成功态，保持“最后状态优先”。
-        assert_eq!(status_json["effective"], json!("thinking"));
-        assert_eq!(status_json["sources"][0]["turn"], json!("turn-2"));
-
-        let state = device_state.lock().await;
-        assert_eq!(
-            state.writes,
-            vec![Mode::Busy, Mode::Error, Mode::Success, Mode::Thinking]
-        );
-    }
-
-    fn temp_runtime_root(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("esp-sim-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        root
-    }
-
-    fn build_hook_request(
-        registry: &SourceAdapterRegistry,
-        source: &str,
-        explicit_mode: Mode,
-        input: Value,
-    ) -> IpcRequestEnvelope {
-        let current_dir = PathBuf::from("/tmp/project");
-        let ctx = HookParseContext {
-            source: source.into(),
-            explicit_mode,
-            current_dir: current_dir.clone(),
-            ttl: None,
-        };
-        let event = registry.parse_or_fallback(input, &ctx);
-        let resolved_mode = resolve_mode(&ctx, &event);
-        let payload = SendPayload {
-            mode: resolved_mode,
-            source: source.into(),
-            session: event.session.clone(),
-            ttl: explicit_mode.default_ttl().map(|ttl| ttl.as_secs()),
-            hook_id: Some("agent-status-light".into()),
-            raw_event: event.raw_event.clone(),
-            raw_tool: event.raw_tool.clone(),
-            capability: Some(event.capability.clone()),
-            suggested_mode: event.suggested_mode,
-            cwd: event
-                .cwd
-                .as_ref()
-                .map(|cwd| cwd.to_string_lossy().to_string()),
-            turn: event.turn.clone(),
-        };
-        IpcRequestEnvelope::new(IpcRequestPayload::Send(payload))
-    }
-
-    #[tokio::test]
-    async fn simulated_hook_trigger_updates_status_and_logs() {
-        let runtime_root = temp_runtime_root("hook-flow");
-        let runtime: Arc<dyn RuntimeStore> = Arc::new(FsRuntimeAdapter::new(runtime_root.clone()));
-        let log: Arc<dyn EventLog> = Arc::new(JsonlLogAdapter::new(runtime.clone()));
-        let daemon = Daemon::new(
-            runtime.clone(),
-            log.clone(),
-            Box::new(MockLightDevice::default()),
-        );
-        let registry = adapters::source::registry();
-
-        let thinking = build_hook_request(
-            &registry,
-            "cursor",
-            Mode::Thinking,
-            serde_json::json!({
-                "conversationId": "conv-1",
-                "hookEventName": "beforeSubmitPrompt",
-                "cwd": "/tmp/project"
-            }),
-        );
-        let response = daemon.handle(thinking).await;
-        assert!(response.ok);
-
-        let busy = build_hook_request(
-            &registry,
-            "cursor",
-            Mode::Busy,
-            serde_json::json!({
-                "conversationId": "conv-1",
-                "hookEventName": "beforeShellExecution",
-                "command": "npm test",
-                "cwd": "/tmp/project",
-                "toolUseId": "turn-1"
-            }),
-        );
-        let response = daemon.handle(busy).await;
-        assert!(response.ok);
-
-        let error = build_hook_request(
-            &registry,
-            "cursor",
-            Mode::Error,
-            serde_json::json!({
-                "conversationId": "conv-1",
-                "hookEventName": "postToolUseFailure",
-                "failureType": "command_error",
-                "cwd": "/tmp/project",
-                "toolUseId": "turn-1"
-            }),
-        );
-        let response = daemon.handle(error).await;
-        assert!(response.ok);
-
-        let status = daemon
-            .handle(IpcRequestEnvelope::new(IpcRequestPayload::Status {
-                verbose: true,
-            }))
-            .await;
-        assert!(status.ok);
-        let data = status.data.expect("status data");
-        assert_eq!(data["effective"], serde_json::json!("error"));
-        assert_eq!(data["sources"][0]["source"], serde_json::json!("cursor"));
-        assert_eq!(data["sources"][0]["session"], serde_json::json!("conv-1"));
-        assert_eq!(
-            data["sources"][0]["raw_event"],
-            serde_json::json!("postToolUseFailure")
-        );
-        assert_eq!(data["sources"][0]["turn"], serde_json::json!("turn-1"));
-
-        let logs = log.tail(20).expect("read logs");
-        let kinds = logs
-            .iter()
-            .map(|item| item.kind.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(kinds.iter().filter(|kind| **kind == "ipc_send").count(), 3);
-
-        let stop = daemon
-            .handle(IpcRequestEnvelope::new(IpcRequestPayload::Stop))
-            .await;
-        assert!(stop.ok);
-
-        let final_logs = log.tail(50).expect("read final logs");
-        assert!(
-            final_logs
-                .iter()
-                .any(|item| item.message == "stop requested")
-        );
-        assert!(
-            final_logs
-                .iter()
-                .any(|item| item.message == "accepted state update")
-        );
-
-        let _ = std::fs::remove_dir_all(runtime_root);
-    }
-
-    #[tokio::test]
-    async fn simulated_alarm_flow_recovers_after_follow_up_hook() {
-        let runtime_root = temp_runtime_root("alarm-flow");
-        let runtime: Arc<dyn RuntimeStore> = Arc::new(FsRuntimeAdapter::new(runtime_root.clone()));
-        let log: Arc<dyn EventLog> = Arc::new(JsonlLogAdapter::new(runtime.clone()));
-        let daemon = Daemon::new(
-            runtime.clone(),
-            log.clone(),
-            Box::new(MockLightDevice::default()),
-        );
-        let registry = adapters::source::registry();
-
-        // 第一步先模拟 Claude 发起权限请求，状态应立即进入 alarm。
-        let alarm = build_hook_request(
-            &registry,
-            "claude",
-            Mode::Alarm,
-            serde_json::json!({
-                "session_id": "session-alarm-1",
-                "hook_event_name": "PermissionRequest",
-                "cwd": "/tmp/project"
-            }),
-        );
-        let response = daemon.handle(alarm).await;
-        assert!(response.ok);
-
-        let status = daemon
-            .handle(IpcRequestEnvelope::new(IpcRequestPayload::Status {
-                verbose: true,
-            }))
-            .await;
-        assert!(status.ok);
-        let data = status.data.expect("status data after alarm");
-        assert_eq!(data["effective"], serde_json::json!("alarm"));
-        assert_eq!(
-            data["sources"][0]["raw_event"],
-            serde_json::json!("PermissionRequest")
-        );
-
-        // 第二步模拟用户完成选择后，Claude 继续发出 PostToolBatch。
-        // 这正是现场里最容易漏装 Hook 的恢复事件；若恢复正常，状态必须尽快离开 alarm。
-        let resume = build_hook_request(
-            &registry,
-            "claude",
-            Mode::Busy,
-            serde_json::json!({
-                "session_id": "session-alarm-1",
-                "hook_event_name": "PostToolBatch",
-                "cwd": "/tmp/project"
-            }),
-        );
-        let response = daemon.handle(resume).await;
-        assert!(response.ok);
-
-        let status = daemon
-            .handle(IpcRequestEnvelope::new(IpcRequestPayload::Status {
-                verbose: true,
-            }))
-            .await;
-        assert!(status.ok);
-        let data = status.data.expect("status data after resume");
-        assert_eq!(data["effective"], serde_json::json!("busy"));
-        assert_eq!(
-            data["sources"][0]["raw_event"],
-            serde_json::json!("PostToolBatch")
-        );
-        assert_eq!(data["sources"][0]["mode"], serde_json::json!("busy"));
-
-        let logs = log.tail(20).expect("read logs");
-        assert_eq!(
-            logs.iter().filter(|item| item.kind == "ipc_send").count(),
-            2
-        );
-
-        let _ = std::fs::remove_dir_all(runtime_root);
-    }
-
-    #[tokio::test]
-    async fn simulated_alarm_then_success_updates_effective_mode() {
-        let runtime_root = temp_runtime_root("alarm-success");
-        let runtime: Arc<dyn RuntimeStore> = Arc::new(FsRuntimeAdapter::new(runtime_root.clone()));
-        let log: Arc<dyn EventLog> = Arc::new(JsonlLogAdapter::new(runtime.clone()));
-        let daemon = Daemon::new(runtime.clone(), log, Box::new(MockLightDevice::default()));
-        let registry = adapters::source::registry();
-
-        let alarm = build_hook_request(
-            &registry,
-            "claude",
-            Mode::Alarm,
-            serde_json::json!({
-                "session_id": "session-alarm-success-1",
-                "hook_event_name": "PermissionRequest",
-                "cwd": "/tmp/project"
-            }),
-        );
-        let response = daemon.handle(alarm).await;
-        assert!(response.ok);
-
-        let success = build_hook_request(
-            &registry,
-            "claude",
-            Mode::Success,
-            serde_json::json!({
-                "session_id": "session-alarm-success-1",
-                "hook_event_name": "SessionEnd",
-                "cwd": "/tmp/project"
-            }),
-        );
-        let response = daemon.handle(success).await;
-        assert!(response.ok);
-
-        let status = daemon
-            .handle(IpcRequestEnvelope::new(IpcRequestPayload::Status {
-                verbose: true,
-            }))
-            .await;
-        assert!(status.ok);
-        let data = status.data.expect("status data after success");
-        assert_eq!(data["effective"], serde_json::json!("success"));
-        assert_eq!(
-            data["sources"][0]["raw_event"],
-            serde_json::json!("SessionEnd")
-        );
-        assert_eq!(data["sources"][0]["mode"], serde_json::json!("success"));
-
-        let _ = std::fs::remove_dir_all(runtime_root);
-    }
-
-    #[test]
-    fn append_log_uses_warn_level_when_error_code_present() {
-        let runtime = Arc::new(TestRuntimeStore);
-        let captured = Arc::new(Mutex::new(Vec::<LogEvent>::new()));
-
-        struct CapturingLog {
-            captured: Arc<Mutex<Vec<LogEvent>>>,
-        }
-
-        impl EventLog for CapturingLog {
-            fn append(&self, event: LogEvent) -> AppResult<()> {
-                self.captured.blocking_lock().push(event);
-                Ok(())
-            }
-
-            fn tail(&self, _limit: usize) -> AppResult<Vec<LogEvent>> {
-                Ok(Vec::new())
-            }
-        }
-
-        let daemon = Daemon::new(
-            runtime,
-            Arc::new(CapturingLog {
-                captured: captured.clone(),
-            }),
-            Box::new(TestLightDevice {
-                state: Arc::new(Mutex::new(DeviceState::default())),
-            }),
-        );
-
-        daemon
-            .append_log(
-                "ble",
-                "write failed",
-                Some("ble_write_failed"),
-                Some("codex"),
-                Some("session-1"),
-                Some(Mode::Error),
-            )
-            .expect("append log should succeed");
-
-        let items = captured.blocking_lock();
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].level, "warn");
-        assert_eq!(items[0].timestamp <= Utc::now(), true);
-    }
-}
+#[path = "../tests/core/daemon_tests.rs"]
+mod tests;

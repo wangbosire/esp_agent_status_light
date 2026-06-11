@@ -124,53 +124,7 @@ fn dirs_home() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("."))
 }
 
+// 测试实现拆到独立目录，避免与 Codex Hook 安装逻辑混写在同一个文件里。
 #[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::*;
-    use crate::ports::ipc::IpcTransport;
-
-    struct TestPlatform;
-
-    impl PlatformAdapter for TestPlatform {
-        fn runtime_root(&self) -> PathBuf {
-            PathBuf::from(".")
-        }
-
-        fn default_ipc_adapter(&self, _ipc_path: &Path) -> Box<dyn IpcTransport> {
-            panic!("not used in tests");
-        }
-
-        fn quote_hook_command(&self, command: &HookCommand) -> String {
-            format!("{} {}", command.exe.display(), command.args.join(" "))
-        }
-
-        fn decorate_hook_command(&self, object: &mut Value, command: &HookCommand) {
-            object["command"] = json!(self.quote_hook_command(command));
-        }
-
-        fn spawn_background_daemon(&self, _exe: &Path) -> AppResult<()> {
-            panic!("not used in tests");
-        }
-    }
-
-    #[test]
-    fn codex_install_generates_green_session_start_hook() {
-        let adapter = CodexInstallAdapter;
-        let specs = adapter.hook_specs(Path::new("/tmp/esp"));
-        let installed = adapter
-            .install(json!({}), &specs, "agent-status-light", &TestPlatform)
-            .expect("install should succeed");
-
-        let session_start_hooks = installed["hooks"]["SessionStart"]
-            .as_array()
-            .expect("SessionStart hooks should exist");
-        assert_eq!(
-            session_start_hooks[0]["hooks"][0]["command"],
-            json!(
-                "/tmp/esp send --mode green --source codex --session auto --ttl 900 --quiet --hook-id agent-status-light"
-            )
-        );
-    }
-}
+#[path = "../../../tests/adapters/install/codex_tests.rs"]
+mod tests;

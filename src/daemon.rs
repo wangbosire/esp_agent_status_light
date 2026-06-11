@@ -566,7 +566,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hook_state_flow_matches_expected_priority_and_turn_rules() {
+    async fn hook_state_flow_uses_latest_state_within_same_session() {
         let device_state = Arc::new(Mutex::new(DeviceState {
             connected: true,
             writes: Vec::new(),
@@ -633,9 +633,9 @@ mod tests {
 
         let status = daemon.handle_status("status-2", true).await;
         let status_json = status.data.expect("status should contain data");
-        // 同一 turn 的 success 不应覆盖尚未过期的 error。
-        assert_eq!(status_json["effective"], json!("error"));
-        assert_eq!(status_json["sources"][0]["mode"], json!("error"));
+        // 按最新规则：同一 session 内始终使用最后一次状态。
+        assert_eq!(status_json["effective"], json!("success"));
+        assert_eq!(status_json["sources"][0]["mode"], json!("success"));
 
         let new_round_thinking = SendPayload {
             mode: Mode::Thinking,
@@ -655,12 +655,15 @@ mod tests {
 
         let status = daemon.handle_status("status-3", true).await;
         let status_json = status.data.expect("status should contain data");
-        // 新一轮 thinking 允许覆盖旧失败态，表示任务重新开始。
+        // 后续新的 thinking 同样应继续覆盖成功态，保持“最后状态优先”。
         assert_eq!(status_json["effective"], json!("thinking"));
         assert_eq!(status_json["sources"][0]["turn"], json!("turn-2"));
 
         let state = device_state.lock().await;
-        assert_eq!(state.writes, vec![Mode::Busy, Mode::Error, Mode::Thinking]);
+        assert_eq!(
+            state.writes,
+            vec![Mode::Busy, Mode::Error, Mode::Success, Mode::Thinking]
+        );
     }
 
     fn temp_runtime_root(name: &str) -> PathBuf {

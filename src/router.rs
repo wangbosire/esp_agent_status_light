@@ -172,63 +172,14 @@ impl StateRouter {
             return true;
         }
 
-        // `error` 代表已经确认的失败结果，同一轮里的 success/demo 往往只是生命周期结束事件，
-        // 不能把真实失败误刷成成功。
+        // 按用户最新要求：同一个 `(source, session)` 始终以最后一条状态为准。
+        // 这里不再对 error/alarm/success/thinking 做任何额外保护或特判，
+        // 只保留“过期状态可被接管”与“新状态写回状态池”这两个基础规则。
         //
-        // 但 `alarm` 的语义不同：它表示“当前正在等待用户操作或授权”，并不是最终失败。
-        // 一旦用户完成选择，后续同 session 的 busy/ai/thinking/success 都应该能够及时接管；
-        // 否则就会出现日志里已经收到了 Stop/SessionEnd success，
-        // `status` 却仍然卡在 alarm 的真实现场问题。
-        if current.mode == Mode::Error
-            && matches!(candidate.mode, Mode::Success | Mode::Demo)
-            && same_turn_or_missing(&current.turn, &candidate.turn)
-        {
-            return false;
-        }
-
-        // 新一轮 prompt/session start 到来时，允许 thinking 把旧 error/alarm 冲掉，表示任务已重新开始。
-        if matches!(current.mode, Mode::Error | Mode::Alarm)
-            && candidate.mode == Mode::Thinking
-            && (turn_changed(&current.turn, &candidate.turn)
-                || candidate
-                    .raw_event
-                    .as_deref()
-                    .is_some_and(is_new_round_event))
-        {
-            return true;
-        }
-
-        // 到这里说明：
-        // 1. 旧状态没过期；
-        // 2. 不是“失败态保护”场景；
-        // 3. 也不是“新一轮 thinking 覆盖旧失败态”的特殊恢复场景。
-        //
-        // 对于同一个 `(source, session)`，状态池里保存的应当是“该会话的最新状态”，
-        // 而不是“该会话历史上优先级最高的状态”。
-        // 全局 effective mode 的优先级比较，应该只发生在不同 source/session 之间。
-        //
-        // 如果这里继续按 priority 决定是否替换，就会出现：
-        // thinking(60) 收到后，后续 success(50) 无法写回状态池，
-        // 结果 `status --verbose` 永远停在 thinking，这正是当前线上看到的 bug。
+        // 全局 effective mode 的优先级比较，仍然只发生在不同 source/session 之间；
+        // 但单个会话自己的状态快照，必须始终反映该会话最新一次上报的 mode。
         candidate.updated_at >= current.updated_at
     }
-}
-
-fn same_turn_or_missing(current: &Option<String>, next: &Option<String>) -> bool {
-    // turn 缺失时无法严格判断是否同轮，只能保守视为“可能同轮”。
-    current.is_none() || next.is_none() || current == next
-}
-
-fn turn_changed(current: &Option<String>, next: &Option<String>) -> bool {
-    matches!((current, next), (Some(left), Some(right)) if left != right)
-}
-
-fn is_new_round_event(raw_event: &str) -> bool {
-    // 这些事件都意味着“新的工作轮次已经开始”，允许它们冲掉旧失败态。
-    matches!(
-        raw_event,
-        "SessionStart" | "sessionStart" | "UserPromptSubmit" | "beforeSubmitPrompt"
-    )
 }
 
 fn duration_to_chrono(duration: std::time::Duration) -> ChronoDuration {
@@ -307,7 +258,7 @@ mod tests {
     }
 
     #[test]
-    fn success_does_not_override_error_in_same_turn() {
+    fn latest_state_overrides_error_in_same_turn() {
         let now = Utc::now();
         let mut router = StateRouter::new();
         let error = SendPayload {
@@ -338,11 +289,12 @@ mod tests {
             cwd: None,
             turn: Some("turn-1".into()),
         };
-        assert_eq!(router.apply_send(&success, now), Mode::Error);
+        assert_eq!(router.apply_send(&success, now), Mode::Success);
+        assert_eq!(router.effective_mode(now), Mode::Success);
     }
 
     #[test]
-    fn success_overrides_alarm_in_same_session() {
+    fn latest_state_overrides_alarm_in_same_session() {
         let now = Utc::now();
         let mut router = StateRouter::new();
         let alarm = SendPayload {

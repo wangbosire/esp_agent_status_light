@@ -31,6 +31,8 @@ impl HookInstallAdapter for CodexInstallAdapter {
             spec(exe, "SessionStart", None, Mode::Green, 900),
             spec(exe, "UserPromptSubmit", None, Mode::Thinking, 900),
             spec(exe, "PreToolUse", Some("Bash"), Mode::Busy, 1800),
+            // 文件读取也属于 AI 处理内容的一部分，因此这里同样挂到 `ai`。
+            spec(exe, "PreToolUse", Some("Read"), Mode::Ai, 900),
             spec(exe, "PreToolUse", Some("apply_patch"), Mode::Ai, 900),
             spec(exe, "PreToolUse", Some("Edit"), Mode::Ai, 900),
             spec(exe, "PreToolUse", Some("Write"), Mode::Ai, 900),
@@ -38,6 +40,8 @@ impl HookInstallAdapter for CodexInstallAdapter {
             // 用户完成授权后，Codex 往往通过 PostToolUse 继续推进流程。
             // 如果这里没有对应 Hook，alarm 会一直挂着，直到 Stop 才被覆盖。
             spec(exe, "PostToolUse", Some("Bash"), Mode::Busy, 1800),
+            // 读取文件后的续流程仍应保持在 `ai`，避免刚读上下文就闪回 busy。
+            spec(exe, "PostToolUse", Some("Read"), Mode::Ai, 900),
             spec(exe, "PostToolUse", Some("apply_patch"), Mode::Ai, 900),
             spec(exe, "PostToolUse", Some("Edit"), Mode::Ai, 900),
             spec(exe, "PostToolUse", Some("Write"), Mode::Ai, 900),

@@ -91,3 +91,24 @@ fn cursor_after_agent_response_maps_to_ai() {
     assert_eq!(event.capability, AgentCapability::Generating);
     assert_eq!(event.suggested_mode, Some(Mode::Ai));
 }
+
+#[test]
+fn cursor_before_read_file_maps_to_ai() {
+    let ctx = HookParseContext {
+        source: "cursor".into(),
+        explicit_mode: Mode::Ai,
+        current_dir: "/tmp/project".into(),
+        ttl: None,
+    };
+    let event = CursorAdapter
+        .parse(
+            json!({
+                "conversationId": "conv-1",
+                "hookEventName": "beforeReadFile",
+            }),
+            &ctx,
+        )
+        .expect("cursor parse should succeed");
+    assert_eq!(event.capability, AgentCapability::Generating);
+    assert_eq!(event.suggested_mode, Some(Mode::Ai));
+}

@@ -69,6 +69,28 @@ fn cursor_install_generates_expected_shell_hook() {
         )
     );
 
+    let read_hooks = installed["hooks"]["beforeReadFile"]
+        .as_array()
+        .expect("beforeReadFile hooks should exist");
+    assert_eq!(read_hooks.len(), 1);
+    assert_eq!(
+        read_hooks[0]["command"],
+        json!(
+            "/tmp/esp send --mode ai --source cursor --session auto --ttl 900 --quiet --hook-id agent-status-light"
+        )
+    );
+
+    let tab_read_hooks = installed["hooks"]["beforeTabFileRead"]
+        .as_array()
+        .expect("beforeTabFileRead hooks should exist");
+    assert_eq!(tab_read_hooks.len(), 1);
+    assert_eq!(
+        tab_read_hooks[0]["command"],
+        json!(
+            "/tmp/esp send --mode ai --source cursor --session auto --ttl 900 --quiet --hook-id agent-status-light"
+        )
+    );
+
     let edit_hooks = installed["hooks"]["preToolUse"]
         .as_array()
         .expect("preToolUse hooks should exist");

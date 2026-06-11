@@ -185,3 +185,87 @@ fn latest_state_replaces_same_session_even_when_priority_is_lower() {
     assert_eq!(snapshot[0].mode, Mode::Success);
     assert_eq!(router.effective_mode(later), Mode::Success);
 }
+
+#[test]
+fn generic_busy_continuation_does_not_override_ai_in_same_session() {
+    let now = Utc::now();
+    let mut router = StateRouter::new();
+
+    let ai = SendPayload {
+        mode: Mode::Ai,
+        source: "claude".into(),
+        session: "session-1".into(),
+        ttl: Some(900),
+        hook_id: None,
+        raw_event: Some("PreToolUse".into()),
+        raw_tool: Some("Write".into()),
+        capability: Some(AgentCapability::Generating),
+        suggested_mode: Some(Mode::Ai),
+        cwd: None,
+        turn: Some("turn-1".into()),
+    };
+    assert_eq!(router.apply_send(&ai, now), Mode::Ai);
+
+    let generic_busy = SendPayload {
+        mode: Mode::Busy,
+        source: "claude".into(),
+        session: "session-1".into(),
+        ttl: Some(1800),
+        hook_id: None,
+        raw_event: Some("PostToolBatch".into()),
+        raw_tool: None,
+        capability: Some(AgentCapability::RunningCommand),
+        suggested_mode: Some(Mode::Busy),
+        cwd: None,
+        turn: None,
+    };
+    let later = now + ChronoDuration::seconds(1);
+    assert_eq!(router.apply_send(&generic_busy, later), Mode::Ai);
+
+    let snapshot = router.snapshot(later);
+    assert_eq!(snapshot.len(), 1);
+    assert_eq!(snapshot[0].mode, Mode::Ai);
+    assert_eq!(router.effective_mode(later), Mode::Ai);
+}
+
+#[test]
+fn explicit_shell_busy_still_overrides_ai_in_same_session() {
+    let now = Utc::now();
+    let mut router = StateRouter::new();
+
+    let ai = SendPayload {
+        mode: Mode::Ai,
+        source: "claude".into(),
+        session: "session-1".into(),
+        ttl: Some(900),
+        hook_id: None,
+        raw_event: Some("PreToolUse".into()),
+        raw_tool: Some("Write".into()),
+        capability: Some(AgentCapability::Generating),
+        suggested_mode: Some(Mode::Ai),
+        cwd: None,
+        turn: Some("turn-1".into()),
+    };
+    assert_eq!(router.apply_send(&ai, now), Mode::Ai);
+
+    let shell_busy = SendPayload {
+        mode: Mode::Busy,
+        source: "claude".into(),
+        session: "session-1".into(),
+        ttl: Some(1800),
+        hook_id: None,
+        raw_event: Some("PreToolUse".into()),
+        raw_tool: Some("Bash".into()),
+        capability: Some(AgentCapability::RunningCommand),
+        suggested_mode: Some(Mode::Busy),
+        cwd: None,
+        turn: Some("turn-2".into()),
+    };
+    let later = now + ChronoDuration::seconds(1);
+    assert_eq!(router.apply_send(&shell_busy, later), Mode::Busy);
+
+    let snapshot = router.snapshot(later);
+    assert_eq!(snapshot.len(), 1);
+    assert_eq!(snapshot[0].mode, Mode::Busy);
+    assert_eq!(router.effective_mode(later), Mode::Busy);
+}

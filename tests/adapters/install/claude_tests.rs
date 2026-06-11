@@ -50,7 +50,31 @@ fn claude_install_generates_post_tool_use_hooks_to_clear_alarm() {
     let hooks = installed["hooks"]["PostToolUse"]
         .as_array()
         .expect("PostToolUse hooks should exist");
-    assert_eq!(hooks.len(), 4);
+    assert_eq!(hooks.len(), 5);
+    assert!(
+        hooks.iter().any(|group| {
+            group["matcher"] == json!("Read")
+                && group["hooks"][0]["command"]
+                    == json!(
+                        "/tmp/esp send --mode ai --source claude --session auto --ttl 900 --quiet --hook-id agent-status-light"
+                    )
+        }),
+        "PostToolUse should contain Read -> ai hook"
+    );
+
+    let pre_hooks = installed["hooks"]["PreToolUse"]
+        .as_array()
+        .expect("PreToolUse hooks should exist");
+    assert!(
+        pre_hooks.iter().any(|group| {
+            group["matcher"] == json!("Read")
+                && group["hooks"][0]["command"]
+                    == json!(
+                        "/tmp/esp send --mode ai --source claude --session auto --ttl 900 --quiet --hook-id agent-status-light"
+                    )
+        }),
+        "PreToolUse should contain Read -> ai hook"
+    );
 
     let batch_hooks = installed["hooks"]["PostToolBatch"]
         .as_array()

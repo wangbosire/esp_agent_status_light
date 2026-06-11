@@ -78,7 +78,12 @@ fn map_claude_mode(
         },
         "SubagentStop" | "Stop" => (AgentCapability::Succeeded, Some(Mode::Success)),
         "PreToolUse" => match tool_name.unwrap_or_default() {
-            "Edit" | "MultiEdit" | "Write" => (AgentCapability::Generating, Some(Mode::Ai)),
+            // 按最新规则，文件读取和文件改写都归到 `ai`：
+            // 只要 Claude 正在围绕文件内容取上下文或落地修改，
+            // 用户看到的都应该是“AI 内容处理态”。
+            "Read" | "Edit" | "MultiEdit" | "Write" => {
+                (AgentCapability::Generating, Some(Mode::Ai))
+            }
             "Bash" => (AgentCapability::RunningCommand, Some(Mode::Busy)),
             _ => (AgentCapability::RunningCommand, Some(Mode::Busy)),
         },

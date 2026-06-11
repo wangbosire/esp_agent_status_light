@@ -172,6 +172,19 @@ impl StateRouter {
             return true;
         }
 
+        // 现场里“AI 生成内容/长任务处理中”最容易被一类笼统 continuation 事件冲掉：
+        // 例如 Claude 的 `PostToolBatch` 往往只说明“这一轮工具链还在继续推进”，
+        // 但并没有明确表明当前已经切回命令执行态。
+        //
+        // 如果上一条明确状态已经是 `ai`，而新事件只是这种缺少工具细节的泛 busy，
+        // 就保留当前 `ai`，让用户能真实看到生成态持续存在。
+        //
+        // 这里仍然只在“同一 source + session”内生效；
+        // 对于真正明确的命令执行事件（例如 Bash / Shell），仍然允许 busy 正常覆盖 ai。
+        if should_preserve_ai_generation_state(current, candidate) {
+            return false;
+        }
+
         // 按用户最新要求：同一个 `(source, session)` 始终以最后一条状态为准。
         // 这里不再对 error/alarm/success/thinking 做任何额外保护或特判，
         // 只保留“过期状态可被接管”与“新状态写回状态池”这两个基础规则。
@@ -185,6 +198,26 @@ impl StateRouter {
 fn duration_to_chrono(duration: std::time::Duration) -> ChronoDuration {
     // `chrono` 与 `std::time` 分属两个世界，这里统一做一次桥接转换。
     ChronoDuration::seconds(duration.as_secs() as i64)
+}
+
+fn should_preserve_ai_generation_state(current: &SourceState, candidate: &SourceState) -> bool {
+    if current.mode != Mode::Ai || candidate.mode != Mode::Busy {
+        return false;
+    }
+
+    // 只有“没有明确工具语义的泛 continuation busy”才不应冲掉 ai。
+    // 明确的 shell/工具执行仍应展示为 busy。
+    if matches!(
+        candidate.raw_tool.as_deref(),
+        Some("Bash" | "Shell" | "Read" | "MCP" | "MultiEdit" | "Edit" | "Write" | "apply_patch")
+    ) {
+        return false;
+    }
+
+    matches!(
+        candidate.raw_event.as_deref(),
+        Some("PostToolBatch" | "afterAgentThought")
+    )
 }
 
 // 测试实现拆到独立目录，避免与状态路由主逻辑混写在同一个文件里。

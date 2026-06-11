@@ -72,7 +72,12 @@ fn map_cursor_mode(
             (AgentCapability::Generating, Some(Mode::Ai))
         }
         "postToolUseFailure" => (AgentCapability::Failed, Some(Mode::Error)),
-        "beforeShellExecution" | "beforeMCPExecution" | "beforeReadFile" | "beforeTabFileRead" => {
+        "beforeReadFile" | "beforeTabFileRead" => {
+            // 文件读取本质上也是 AI 在处理上下文的一部分。
+            // 按最新规则，这类读文件动作不再展示为泛 busy，而是直接进入 `ai`。
+            (AgentCapability::Generating, Some(Mode::Ai))
+        }
+        "beforeShellExecution" | "beforeMCPExecution" => {
             (AgentCapability::RunningCommand, Some(Mode::Busy))
         }
         "afterShellExecution" | "afterMCPExecution" => (AgentCapability::RunningCommand, None),

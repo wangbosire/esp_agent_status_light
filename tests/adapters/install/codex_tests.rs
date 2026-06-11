@@ -46,4 +46,32 @@ fn codex_install_generates_green_session_start_hook() {
             "/tmp/esp send --mode green --source codex --session auto --ttl 900 --quiet --hook-id agent-status-light"
         )
     );
+
+    let pre_tool_hooks = installed["hooks"]["PreToolUse"]
+        .as_array()
+        .expect("PreToolUse hooks should exist");
+    assert!(
+        pre_tool_hooks.iter().any(|group| {
+            group["matcher"] == json!("Read")
+                && group["hooks"][0]["command"]
+                    == json!(
+                        "/tmp/esp send --mode ai --source codex --session auto --ttl 900 --quiet --hook-id agent-status-light"
+                    )
+        }),
+        "PreToolUse should contain Read -> ai hook"
+    );
+
+    let post_tool_hooks = installed["hooks"]["PostToolUse"]
+        .as_array()
+        .expect("PostToolUse hooks should exist");
+    assert!(
+        post_tool_hooks.iter().any(|group| {
+            group["matcher"] == json!("Read")
+                && group["hooks"][0]["command"]
+                    == json!(
+                        "/tmp/esp send --mode ai --source codex --session auto --ttl 900 --quiet --hook-id agent-status-light"
+                    )
+        }),
+        "PostToolUse should contain Read -> ai hook"
+    );
 }

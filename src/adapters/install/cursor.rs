@@ -37,6 +37,10 @@ impl HookInstallAdapter for CursorInstallAdapter {
             spec(exe, "preToolUse", Some("Edit"), Mode::Ai, 900),
             spec(exe, "preToolUse", Some("MultiEdit"), Mode::Ai, 900),
             spec(exe, "beforeShellExecution", None, Mode::Busy, 1800),
+            // Cursor 的读文件官方事件也应该直接进入 `ai`，
+            // 这样“读上下文 -> 生成/修改内容”会保持同一条视觉状态链。
+            spec(exe, "beforeReadFile", None, Mode::Ai, 900),
+            spec(exe, "beforeTabFileRead", None, Mode::Ai, 900),
             // Cursor 回复正文时会触发 afterAgentResponse。
             // 这个事件正是“AI 正在生成内容”最稳定的官方信号之一。
             spec(exe, "afterAgentResponse", None, Mode::Ai, 900),

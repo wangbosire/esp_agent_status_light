@@ -67,7 +67,13 @@ fn map_codex_mode(
         "PostToolUse" => (AgentCapability::RunningCommand, Some(fallback_mode)),
         "PreToolUse" => match tool_name.unwrap_or_default() {
             "Bash" => (AgentCapability::RunningCommand, Some(Mode::Busy)),
-            "apply_patch" | "Edit" | "Write" => (AgentCapability::Generating, Some(Mode::Ai)),
+            // 按最新产品规则，文件读写都属于“AI 正在处理内容”：
+            // - `Read` 表示正在读取文件上下文；
+            // - `apply_patch` / `Edit` / `Write` 表示正在改写文件。
+            // 这些都统一展示为 `ai`，让用户能看到“内容处理态”而不是泛 busy。
+            "Read" | "apply_patch" | "Edit" | "Write" => {
+                (AgentCapability::Generating, Some(Mode::Ai))
+            }
             _ => (AgentCapability::RunningCommand, Some(Mode::Busy)),
         },
         _ => (AgentCapability::Unknown, None),

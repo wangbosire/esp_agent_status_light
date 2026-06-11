@@ -458,6 +458,131 @@ async fn simulated_hook_trigger_updates_status_and_logs() {
 }
 
 #[tokio::test]
+async fn simulated_ai_generation_flow_survives_generic_busy_continuation() {
+    let runtime_root = temp_runtime_root("ai-flow");
+    let runtime: Arc<dyn RuntimeStore> = Arc::new(FsRuntimeAdapter::new(runtime_root.clone()));
+    let log: Arc<dyn EventLog> = Arc::new(JsonlLogAdapter::new(runtime.clone()));
+    let daemon = Daemon::new(
+        runtime.clone(),
+        log.clone(),
+        Box::new(MockLightDevice::default()),
+    );
+    let registry = adapters::source::registry();
+
+    // 第一步模拟 Claude 进入文件生成/写入阶段。
+    // 这类事件应该明确落到 `ai`，对应“AI 正在生成内容/长任务处理中”的灯效。
+    let ai = build_hook_request(
+        &registry,
+        "claude",
+        Mode::Ai,
+        serde_json::json!({
+            "session_id": "session-ai-1",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Write",
+            "cwd": "/tmp/project",
+            "tool_input": {
+                "file_path": "/tmp/project/src/main.rs"
+            },
+            "tool_use_id": "turn-ai-1"
+        }),
+    );
+    let response = daemon.handle(ai).await;
+    assert!(response.ok);
+
+    // 第二步模拟真实现场里常见的 continuation 事件：
+    // Claude 在单次工具完成后可能继续发出 `PostToolBatch`，它只表示“流程还在继续”，
+    // 并不等价于“已经回到明确的命令执行态 busy”。
+    // 因此这里期望 router 继续保留同会话内更有语义的 `ai`。
+    let continuation = build_hook_request(
+        &registry,
+        "claude",
+        Mode::Busy,
+        serde_json::json!({
+            "session_id": "session-ai-1",
+            "hook_event_name": "PostToolBatch",
+            "cwd": "/tmp/project"
+        }),
+    );
+    let response = daemon.handle(continuation).await;
+    assert!(response.ok);
+
+    let status = daemon
+        .handle(IpcRequestEnvelope::new(IpcRequestPayload::Status {
+            verbose: true,
+        }))
+        .await;
+    assert!(status.ok);
+    let data = status.data.expect("status data after ai continuation");
+    assert_eq!(data["effective"], serde_json::json!("ai"));
+    assert_eq!(data["sources"][0]["mode"], serde_json::json!("ai"));
+    assert_eq!(data["sources"][0]["raw_tool"], serde_json::json!("Write"));
+    assert_eq!(
+        data["sources"][0]["raw_event"],
+        serde_json::json!("PreToolUse")
+    );
+
+    // 运行日志里两类事件都应该能看到，方便后续排查为什么最终展示仍是 `ai`。
+    let logs = log.tail(20).expect("read logs");
+    assert!(
+        logs.iter()
+            .any(|item| { item.message == "accepted state update" && item.mode == Some(Mode::Ai) })
+    );
+    assert!(
+        logs.iter().any(|item| {
+            item.message == "accepted state update" && item.mode == Some(Mode::Busy)
+        })
+    );
+
+    let _ = std::fs::remove_dir_all(runtime_root);
+}
+
+#[tokio::test]
+async fn simulated_file_read_flow_maps_to_ai() {
+    let runtime_root = temp_runtime_root("file-read-ai");
+    let runtime: Arc<dyn RuntimeStore> = Arc::new(FsRuntimeAdapter::new(runtime_root.clone()));
+    let log: Arc<dyn EventLog> = Arc::new(JsonlLogAdapter::new(runtime.clone()));
+    let daemon = Daemon::new(
+        runtime.clone(),
+        log.clone(),
+        Box::new(MockLightDevice::default()),
+    );
+    let registry = adapters::source::registry();
+
+    // 仿真 Cursor 读取文件上下文。
+    // 按最新产品规则，文件读取也属于 AI 内容处理流程，因此应直接展示为 `ai`。
+    let read = build_hook_request(
+        &registry,
+        "cursor",
+        Mode::Ai,
+        serde_json::json!({
+            "conversationId": "conv-read-1",
+            "hookEventName": "beforeReadFile",
+            "cwd": "/tmp/project",
+            "toolUseId": "turn-read-1"
+        }),
+    );
+    let response = daemon.handle(read).await;
+    assert!(response.ok);
+
+    let status = daemon
+        .handle(IpcRequestEnvelope::new(IpcRequestPayload::Status {
+            verbose: true,
+        }))
+        .await;
+    assert!(status.ok);
+    let data = status.data.expect("status data after beforeReadFile");
+    assert_eq!(data["effective"], serde_json::json!("ai"));
+    assert_eq!(data["sources"][0]["mode"], serde_json::json!("ai"));
+    assert_eq!(
+        data["sources"][0]["raw_event"],
+        serde_json::json!("beforeReadFile")
+    );
+    assert_eq!(data["sources"][0]["turn"], serde_json::json!("turn-read-1"));
+
+    let _ = std::fs::remove_dir_all(runtime_root);
+}
+
+#[tokio::test]
 async fn simulated_alarm_flow_recovers_after_follow_up_hook() {
     let runtime_root = temp_runtime_root("alarm-flow");
     let runtime: Arc<dyn RuntimeStore> = Arc::new(FsRuntimeAdapter::new(runtime_root.clone()));

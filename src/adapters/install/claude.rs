@@ -31,6 +31,8 @@ impl HookInstallAdapter for ClaudeInstallAdapter {
             spec(exe, "SessionStart", None, Mode::Green, 900),
             spec(exe, "UserPromptSubmit", None, Mode::Thinking, 900),
             spec(exe, "PreToolUse", Some("Bash"), Mode::Busy, 1800),
+            // 文件读取按最新规则也属于 AI 内容处理态。
+            spec(exe, "PreToolUse", Some("Read"), Mode::Ai, 900),
             spec(exe, "PreToolUse", Some("Edit"), Mode::Ai, 900),
             spec(exe, "PreToolUse", Some("MultiEdit"), Mode::Ai, 900),
             spec(exe, "PreToolUse", Some("Write"), Mode::Ai, 900),
@@ -39,6 +41,7 @@ impl HookInstallAdapter for ClaudeInstallAdapter {
             // Claude 用户确认后，通常会继续触发 PostToolUse。
             // 这里补上对应 Hook，确保 alarm 能及时回到 busy/ai。
             spec(exe, "PostToolUse", Some("Bash"), Mode::Busy, 1800),
+            spec(exe, "PostToolUse", Some("Read"), Mode::Ai, 900),
             spec(exe, "PostToolUse", Some("Edit"), Mode::Ai, 900),
             spec(exe, "PostToolUse", Some("MultiEdit"), Mode::Ai, 900),
             spec(exe, "PostToolUse", Some("Write"), Mode::Ai, 900),

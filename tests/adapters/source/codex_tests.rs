@@ -48,6 +48,28 @@ fn codex_bash_maps_to_busy() {
 }
 
 #[test]
+fn codex_read_maps_to_ai() {
+    let ctx = HookParseContext {
+        source: "codex".into(),
+        explicit_mode: Mode::Ai,
+        current_dir: ".".into(),
+        ttl: None,
+    };
+    let event = CodexAdapter
+        .parse(
+            json!({
+                "session_id": "abc",
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Read",
+            }),
+            &ctx,
+        )
+        .expect("codex parse should succeed");
+    assert_eq!(event.capability, AgentCapability::Generating);
+    assert_eq!(event.suggested_mode, Some(Mode::Ai));
+}
+
+#[test]
 fn codex_post_tool_use_preserves_ai_fallback_mode() {
     let ctx = HookParseContext {
         source: "codex".into(),

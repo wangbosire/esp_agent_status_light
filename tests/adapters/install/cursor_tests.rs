@@ -57,4 +57,29 @@ fn cursor_install_generates_expected_shell_hook() {
             "/tmp/esp send --mode busy --source cursor --session auto --ttl 1800 --quiet --hook-id agent-status-light"
         )
     );
+
+    let response_hooks = installed["hooks"]["afterAgentResponse"]
+        .as_array()
+        .expect("afterAgentResponse hooks should exist");
+    assert_eq!(response_hooks.len(), 1);
+    assert_eq!(
+        response_hooks[0]["command"],
+        json!(
+            "/tmp/esp send --mode ai --source cursor --session auto --ttl 900 --quiet --hook-id agent-status-light"
+        )
+    );
+
+    let edit_hooks = installed["hooks"]["preToolUse"]
+        .as_array()
+        .expect("preToolUse hooks should exist");
+    assert!(
+        edit_hooks.iter().any(|item| {
+            item["matcher"] == json!("Write")
+                && item["command"]
+                    == json!(
+                        "/tmp/esp send --mode ai --source cursor --session auto --ttl 900 --quiet --hook-id agent-status-light"
+                    )
+        }),
+        "preToolUse should contain Write -> ai hook"
+    );
 }

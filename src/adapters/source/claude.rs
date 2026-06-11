@@ -37,6 +37,7 @@ impl SourceAdapter for ClaudeAdapter {
             raw.hook_event_name.as_deref(),
             raw.tool_name.as_deref(),
             raw.reason.as_deref(),
+            ctx.explicit_mode,
         );
 
         Ok(build_event(ctx, &input, capability, suggested_mode))
@@ -47,6 +48,7 @@ fn map_claude_mode(
     raw_event: Option<&str>,
     tool_name: Option<&str>,
     reason: Option<&str>,
+    fallback_mode: Mode,
 ) -> (AgentCapability, Option<Mode>) {
     // Claude 的 Notification/PermissionDenied 等事件语义与其他宿主不完全相同，
     // 必须在 adapter 层单独编码，保证核心层看到的是稳定能力枚举。
@@ -61,7 +63,10 @@ fn map_claude_mode(
         "PermissionDenied" | "PostToolUseFailure" | "StopFailure" => {
             (AgentCapability::Failed, Some(Mode::Error))
         }
-        "PostToolUse" | "PostToolBatch" => (AgentCapability::RunningCommand, None),
+        // Claude 的 PostToolUse/PostToolBatch 在第一阶段同样不从 tool_response 里猜结果，
+        // 直接保留安装器配置的兜底 mode，让编辑类工具能稳定维持 ai，
+        // 同时也能让 PostToolBatch 把 alarm 及时推出到 busy。
+        "PostToolUse" | "PostToolBatch" => (AgentCapability::RunningCommand, Some(fallback_mode)),
         // 在真实使用中，Claude 结束会话时不一定总会先触发 Stop。
         // 因此正常 SessionEnd 也应当给出 success，避免任务已完成但灯直接回落到 demo。
         // 如果明确带有中止/关闭类 reason，则仍回落为 demo，让失败态继续由更早的 error 事件主导。

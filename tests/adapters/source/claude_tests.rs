@@ -88,3 +88,25 @@ fn claude_session_end_aborted_keeps_demo() {
     assert_eq!(event.capability, AgentCapability::Idle);
     assert_eq!(event.suggested_mode, Some(Mode::Demo));
 }
+
+#[test]
+fn claude_post_tool_use_preserves_ai_fallback_mode() {
+    let ctx = HookParseContext {
+        source: "claude".into(),
+        explicit_mode: Mode::Ai,
+        current_dir: ".".into(),
+        ttl: None,
+    };
+    let event = ClaudeAdapter
+        .parse(
+            json!({
+                "session_id": "abc",
+                "hook_event_name": "PostToolUse",
+                "tool_name": "Write",
+            }),
+            &ctx,
+        )
+        .expect("claude parse should succeed");
+    assert_eq!(event.capability, AgentCapability::RunningCommand);
+    assert_eq!(event.suggested_mode, Some(Mode::Ai));
+}

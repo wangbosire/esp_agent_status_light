@@ -70,3 +70,24 @@ fn cursor_session_and_turn_use_camel_case_fields() {
     assert_eq!(event.turn.as_deref(), Some("tool-1"));
     assert_eq!(event.raw_event.as_deref(), Some("beforeShellExecution"));
 }
+
+#[test]
+fn cursor_after_agent_response_maps_to_ai() {
+    let ctx = HookParseContext {
+        source: "cursor".into(),
+        explicit_mode: Mode::Ai,
+        current_dir: "/tmp/project".into(),
+        ttl: None,
+    };
+    let event = CursorAdapter
+        .parse(
+            json!({
+                "conversationId": "conv-1",
+                "hookEventName": "afterAgentResponse",
+            }),
+            &ctx,
+        )
+        .expect("cursor parse should succeed");
+    assert_eq!(event.capability, AgentCapability::Generating);
+    assert_eq!(event.suggested_mode, Some(Mode::Ai));
+}

@@ -46,3 +46,25 @@ fn codex_bash_maps_to_busy() {
     assert_eq!(event.capability, AgentCapability::RunningCommand);
     assert_eq!(event.suggested_mode, Some(Mode::Busy));
 }
+
+#[test]
+fn codex_post_tool_use_preserves_ai_fallback_mode() {
+    let ctx = HookParseContext {
+        source: "codex".into(),
+        explicit_mode: Mode::Ai,
+        current_dir: ".".into(),
+        ttl: None,
+    };
+    let event = CodexAdapter
+        .parse(
+            json!({
+                "session_id": "abc",
+                "hook_event_name": "PostToolUse",
+                "tool_name": "apply_patch",
+            }),
+            &ctx,
+        )
+        .expect("codex parse should succeed");
+    assert_eq!(event.capability, AgentCapability::RunningCommand);
+    assert_eq!(event.suggested_mode, Some(Mode::Ai));
+}

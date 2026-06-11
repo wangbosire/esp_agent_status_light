@@ -31,7 +31,15 @@ impl HookInstallAdapter for CursorInstallAdapter {
             spec(exe, "sessionStart", None, Mode::Green, 900),
             spec(exe, "beforeSubmitPrompt", None, Mode::Thinking, 900),
             spec(exe, "preToolUse", Some("Shell"), Mode::Busy, 1800),
+            // Cursor 在真正落地文件写入前，会先经过通用 preToolUse。
+            // 把编辑类工具单独挂成 ai，才能覆盖“正在生成/改写内容”的长过程。
+            spec(exe, "preToolUse", Some("Write"), Mode::Ai, 900),
+            spec(exe, "preToolUse", Some("Edit"), Mode::Ai, 900),
+            spec(exe, "preToolUse", Some("MultiEdit"), Mode::Ai, 900),
             spec(exe, "beforeShellExecution", None, Mode::Busy, 1800),
+            // Cursor 回复正文时会触发 afterAgentResponse。
+            // 这个事件正是“AI 正在生成内容”最稳定的官方信号之一。
+            spec(exe, "afterAgentResponse", None, Mode::Ai, 900),
             spec(exe, "afterFileEdit", None, Mode::Ai, 900),
             spec(exe, "afterTabFileEdit", None, Mode::Ai, 900),
             spec(exe, "postToolUseFailure", None, Mode::Error, 600),

@@ -37,8 +37,11 @@ impl SourceAdapter for CodexAdapter {
         let raw: CodexHookInput = serde_json::from_value(input.clone())
             .map_err(|err| AppError::invalid("failed to parse codex hook stdin", err))?;
 
-        let (capability, suggested_mode) =
-            map_codex_mode(raw.hook_event_name.as_deref(), raw.tool_name.as_deref());
+        let (capability, suggested_mode) = map_codex_mode(
+            raw.hook_event_name.as_deref(),
+            raw.tool_name.as_deref(),
+            ctx.explicit_mode,
+        );
 
         Ok(build_event(ctx, &input, capability, suggested_mode))
     }
@@ -47,6 +50,7 @@ impl SourceAdapter for CodexAdapter {
 fn map_codex_mode(
     raw_event: Option<&str>,
     tool_name: Option<&str>,
+    fallback_mode: Mode,
 ) -> (AgentCapability, Option<Mode>) {
     // 这里严格编码 Codex 事件到统一能力/模式的映射，
     // 不把这些判断散落到 daemon 或 router 中。
@@ -57,7 +61,10 @@ fn map_codex_mode(
         }
         "PermissionRequest" => (AgentCapability::WaitingForUser, Some(Mode::Alarm)),
         "SubagentStop" | "Stop" => (AgentCapability::Succeeded, Some(Mode::Success)),
-        "PostToolUse" => (AgentCapability::RunningCommand, None),
+        // `PostToolUse` 官方并不稳定提供可供第一阶段统一解析的成功/失败语义，
+        // 因此这里必须保留安装器写入的兜底 mode：
+        // Bash 继续保持 busy，Edit/Write/apply_patch 则继续保持 ai。
+        "PostToolUse" => (AgentCapability::RunningCommand, Some(fallback_mode)),
         "PreToolUse" => match tool_name.unwrap_or_default() {
             "Bash" => (AgentCapability::RunningCommand, Some(Mode::Busy)),
             "apply_patch" | "Edit" | "Write" => (AgentCapability::Generating, Some(Mode::Ai)),

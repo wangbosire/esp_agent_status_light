@@ -17,7 +17,7 @@ use crate::ports::platform::PlatformAdapter;
 pub struct LinuxAdapter;
 
 impl PlatformAdapter for LinuxAdapter {
-    fn runtime_root(&self) -> PathBuf {
+    fn runtime_root(&self) -> AppResult<PathBuf> {
         unix_runtime_root()
     }
 

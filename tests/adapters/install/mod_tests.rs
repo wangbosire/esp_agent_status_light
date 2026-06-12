@@ -55,8 +55,8 @@ struct TestPlatform {
 }
 
 impl PlatformAdapter for TestPlatform {
-    fn runtime_root(&self) -> PathBuf {
-        PathBuf::from(".")
+    fn runtime_root(&self) -> crate::model::AppResult<PathBuf> {
+        Ok(PathBuf::from("."))
     }
 
     fn default_ipc_adapter(&self, _ipc_path: &Path) -> Box<dyn IpcTransport> {

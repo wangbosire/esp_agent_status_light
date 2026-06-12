@@ -13,7 +13,7 @@ use crate::ports::ipc::IpcTransport;
 /// 平台适配层只处理“平台差异”，不负责状态路由。
 pub trait PlatformAdapter: Send + Sync {
     /// 返回当前平台默认 runtime 根目录。
-    fn runtime_root(&self) -> PathBuf;
+    fn runtime_root(&self) -> AppResult<PathBuf>;
     /// 返回当前平台默认 IPC 客户端实现。
     ///
     /// 例如 Unix 下可能是 unix socket，Windows 下则可能是 named pipe。

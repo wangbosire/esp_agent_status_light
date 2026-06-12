@@ -756,7 +756,7 @@ fn append_log_uses_warn_level_when_error_code_present() {
     let items = captured.blocking_lock();
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].level, "warn");
-    assert_eq!(items[0].timestamp <= Utc::now(), true);
+    assert!(items[0].timestamp <= Utc::now());
     assert_eq!(items[0].phase, None);
     assert_eq!(items[0].context, None);
 }

@@ -6,6 +6,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use crate::adapters::install::{cursor_uninstall, decorate_command_fields};
+use crate::adapters::platform::user_home_dir;
 use crate::model::{AppResult, HookCommand, HookSpec, InstallScope, Mode};
 use crate::ports::hook_install::HookInstallAdapter;
 use crate::ports::platform::PlatformAdapter;
@@ -18,11 +19,11 @@ impl HookInstallAdapter for CursorInstallAdapter {
         "cursor"
     }
 
-    fn config_path(&self, scope: &InstallScope) -> PathBuf {
-        match scope {
-            InstallScope::Global => dirs_home().join(".cursor").join("hooks.json"),
+    fn config_path(&self, scope: &InstallScope) -> AppResult<PathBuf> {
+        Ok(match scope {
+            InstallScope::Global => user_home_dir()?.join(".cursor").join("hooks.json"),
             InstallScope::Project(root) => root.join(".cursor").join("hooks.json"),
-        }
+        })
     }
 
     fn hook_specs(&self, exe: &Path) -> Vec<HookSpec> {
@@ -116,13 +117,6 @@ fn spec(exe: &Path, event: &str, matcher: Option<&str>, mode: Mode, ttl: u64) ->
             ],
         },
     }
-}
-
-/// 返回当前用户 home 目录。
-fn dirs_home() -> PathBuf {
-    std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."))
 }
 
 // 测试实现拆到独立目录，避免与 Cursor Hook 安装逻辑混写在同一个文件里。

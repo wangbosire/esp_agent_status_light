@@ -23,7 +23,7 @@ use crate::daemon::Daemon;
 use crate::model::{
     AgentCapability, AgentEvent, AgentSource, AppError, AppResult, HookCommand, HookParseContext,
     HookSpec, InstallManifest, InstallScope, IpcRequestEnvelope, IpcRequestPayload, Mode,
-    SendPayload, StatusResponse,
+    RuntimeLogEvent, SendPayload, StatusResponse,
 };
 use crate::ports::device::LightDevice;
 use crate::ports::hook_install::HookInstallRegistry;
@@ -43,6 +43,16 @@ pub enum CommandOutput {
     Silent,
 }
 
+struct SendCommandArgs {
+    explicit_mode: Mode,
+    source: String,
+    session: String,
+    ttl: Option<u64>,
+    quiet: bool,
+    strict: bool,
+    hook_id: String,
+}
+
 /// 每次 CLI 调用时临时构建的应用上下文。
 /// 它只持有轻量级适配器和注册表，不在这里保存业务状态。
 struct AppContext {
@@ -60,21 +70,21 @@ struct AppContext {
 
 impl AppContext {
     /// 构建一套默认 CLI 运行所需的适配器集合。
-    fn build() -> Self {
+    fn build() -> AppResult<Self> {
         // 所有默认 adapter 装配集中在这里，避免散落在各个命令实现中。
         let platform = adapters::platform::current_platform();
-        let runtime: Arc<dyn RuntimeStore> = Arc::new(
-            adapters::runtime::fs::FsRuntimeAdapter::new(platform.runtime_root()),
-        );
+        let runtime_root = platform.runtime_root()?;
+        let runtime: Arc<dyn RuntimeStore> =
+            Arc::new(adapters::runtime::fs::FsRuntimeAdapter::new(runtime_root));
         let log: Arc<dyn EventLog> =
             Arc::new(adapters::log::jsonl::JsonlLogAdapter::new(runtime.clone()));
-        Self {
+        Ok(Self {
             source_registry: adapters::source::registry(),
             install_registry: adapters::install::registry(),
             runtime,
             log,
             platform,
-        }
+        })
     }
 
     /// 创建一个面向 daemon 的 IPC 客户端。
@@ -115,7 +125,7 @@ impl AppContext {
 /// 并为每次命令调用重新装配一套轻量上下文。
 pub async fn run(cli: Cli) -> AppResult<CommandOutput> {
     // 每次命令调用都重新构建上下文即可，避免在 CLI 进程内维护多余全局状态。
-    let ctx = AppContext::build();
+    let ctx = AppContext::build()?;
 
     match cli.command {
         Commands::Daemon { foreground } => run_daemon(ctx, foreground).await,
@@ -127,7 +137,21 @@ pub async fn run(cli: Cli) -> AppResult<CommandOutput> {
             quiet,
             strict,
             hook_id,
-        } => run_send(ctx, mode, source, session, ttl, quiet, strict, hook_id).await,
+        } => {
+            run_send(
+                ctx,
+                SendCommandArgs {
+                    explicit_mode: mode,
+                    source,
+                    session,
+                    ttl,
+                    quiet,
+                    strict,
+                    hook_id,
+                },
+            )
+            .await
+        }
         Commands::Status { verbose } => run_status(ctx, verbose).await,
         Commands::Logs { limit } => run_logs(ctx, limit).await,
         Commands::Stop { force } => run_stop(ctx, force).await,
@@ -139,35 +163,10 @@ pub async fn run(cli: Cli) -> AppResult<CommandOutput> {
 /// 以“尽力写入”方式追加一条运行链路日志。
 ///
 /// 运行链路日志用于定位内部处理路径，不应反过来影响主命令行为。
-fn append_runtime_log(
-    log: &dyn EventLog,
-    kind: &str,
-    phase: &str,
-    message: &str,
-    code: Option<&str>,
-    source: Option<&str>,
-    session: Option<&str>,
-    mode: Option<Mode>,
-    context: Option<Value>,
-) {
+fn append_runtime_log(log: &dyn EventLog, event: RuntimeLogEvent<'_>) {
     // runtime 日志只用于排查链路问题，因此这里采用“尽力写入”策略：
     // 即使日志失败，也绝不反过来阻塞主功能。
-    let _ = log.append_runtime(crate::model::LogEvent {
-        timestamp: Utc::now(),
-        level: if code.is_some() {
-            "warn".into()
-        } else {
-            "info".into()
-        },
-        kind: kind.into(),
-        message: message.into(),
-        phase: Some(phase.into()),
-        code: code.map(ToOwned::to_owned),
-        source: source.map(ToOwned::to_owned),
-        session: session.map(ToOwned::to_owned),
-        mode,
-        context,
-    });
+    let _ = log.append_runtime(event.into_log_event());
 }
 
 async fn run_daemon(ctx: AppContext, foreground: bool) -> AppResult<CommandOutput> {
@@ -175,14 +174,16 @@ async fn run_daemon(ctx: AppContext, foreground: bool) -> AppResult<CommandOutpu
         // 非前台模式只负责拉起后台 daemon，自身立即退出。
         append_runtime_log(
             ctx.log.as_ref(),
-            "runtime_command",
-            "daemon.background_requested",
-            "daemon command requested background startup",
-            None,
-            None,
-            None,
-            None,
-            None,
+            RuntimeLogEvent {
+                kind: "runtime_command",
+                phase: "daemon.background_requested",
+                message: "daemon command requested background startup",
+                code: None,
+                source: None,
+                session: None,
+                mode: None,
+                context: None,
+            },
         );
         let exe =
             std::env::current_exe().map_err(|err| AppError::io("resolve current exe", err))?;
@@ -196,75 +197,72 @@ async fn run_daemon(ctx: AppContext, foreground: bool) -> AppResult<CommandOutpu
 
     append_runtime_log(
         ctx.log.as_ref(),
-        "runtime_command",
-        "daemon.foreground_requested",
-        "daemon command entering foreground run loop",
-        None,
-        None,
-        None,
-        None,
-        None,
+        RuntimeLogEvent {
+            kind: "runtime_command",
+            phase: "daemon.foreground_requested",
+            message: "daemon command entering foreground run loop",
+            code: None,
+            source: None,
+            session: None,
+            mode: None,
+            context: None,
+        },
     );
     let daemon = Daemon::new(ctx.runtime.clone(), ctx.log.clone(), ctx.device());
     daemon.run(ctx.ipc_server()).await?;
     Ok(CommandOutput::Silent)
 }
 
-async fn run_send(
-    ctx: AppContext,
-    explicit_mode: Mode,
-    source: String,
-    session: String,
-    ttl: Option<u64>,
-    quiet: bool,
-    strict: bool,
-    hook_id: String,
-) -> AppResult<CommandOutput> {
+async fn run_send(ctx: AppContext, args: SendCommandArgs) -> AppResult<CommandOutput> {
     // 当前工作目录既用于 fallback session 生成，也用于状态排障输出。
     let current_dir =
         std::env::current_dir().map_err(|err| AppError::io("read current dir", err))?;
     append_runtime_log(
         ctx.log.as_ref(),
-        "runtime_send",
-        "send.received",
-        "send command started",
-        None,
-        Some(&source),
-        None,
-        Some(explicit_mode),
-        Some(json!({
-            "session_arg": session,
-            "explicit_mode": explicit_mode,
-            "ttl_secs": ttl,
-            "strict": strict,
-            "quiet": quiet,
-            "hook_id": hook_id,
-            "cwd": current_dir,
-        })),
+        RuntimeLogEvent {
+            kind: "runtime_send",
+            phase: "send.received",
+            message: "send command started",
+            code: None,
+            source: Some(&args.source),
+            session: None,
+            mode: Some(args.explicit_mode),
+            context: Some(json!({
+                "session_arg": args.session,
+                "explicit_mode": args.explicit_mode,
+                "ttl_secs": args.ttl,
+                "strict": args.strict,
+                "quiet": args.quiet,
+                "hook_id": args.hook_id,
+                "cwd": current_dir.clone(),
+            })),
+        },
     );
     let ctx_parse = HookParseContext {
-        source: source.clone(),
-        explicit_mode,
+        source: args.source.clone(),
+        explicit_mode: args.explicit_mode,
         current_dir: current_dir.clone(),
-        ttl: ttl.map(Duration::from_secs),
+        ttl: args.ttl.map(Duration::from_secs),
     };
 
     // 手动模式不依赖 Hook stdin。
     // Hook 模式才会读取 stdin 并交给 SourceAdapterRegistry 归一。
-    let event = if source == "manual" {
+    let event = if args.source == "manual" {
         append_runtime_log(
             ctx.log.as_ref(),
-            "runtime_send",
-            "send.manual_bypass",
-            "manual source bypassed hook stdin parsing",
-            None,
-            Some("manual"),
-            Some("manual"),
-            Some(explicit_mode),
-            Some(json!({
-                "source": "manual",
-                "reason": "manual_source",
-            })),
+            RuntimeLogEvent {
+                kind: "runtime_send",
+                phase: "send.manual_bypass",
+                message: "manual source bypassed hook stdin parsing",
+                code: None,
+                source: Some("manual"),
+                session: Some("manual"),
+                mode: Some(args.explicit_mode),
+                context: Some(json!({
+                    "source": "manual",
+                    "reason": "manual_source",
+                })),
+            },
         );
         AgentEvent {
             source: AgentSource::new("manual"),
@@ -280,88 +278,94 @@ async fn run_send(
         let stdin_json = read_stdin_json()?.unwrap_or_else(|| json!({}));
         append_runtime_log(
             ctx.log.as_ref(),
-            "runtime_send",
-            "send.stdin_loaded",
-            "hook stdin loaded",
-            None,
-            Some(&source),
-            None,
-            Some(explicit_mode),
-            Some(json!({
-                "has_hook_event": stdin_json
-                    .get("hook_event_name")
-                    .or_else(|| stdin_json.get("hookEventName"))
-                    .is_some(),
-                "hook_event": stdin_json
-                    .get("hook_event_name")
-                    .or_else(|| stdin_json.get("hookEventName")),
-                "tool_name": stdin_json
-                    .get("tool_name")
-                    .or_else(|| stdin_json.get("toolName"))
-                    .or_else(|| stdin_json.get("tool")),
-                "turn": stdin_json
-                    .get("turn")
-                    .or_else(|| stdin_json.get("turn_id"))
-                    .or_else(|| stdin_json.get("turnId")),
-            })),
+            RuntimeLogEvent {
+                kind: "runtime_send",
+                phase: "send.stdin_loaded",
+                message: "hook stdin loaded",
+                code: None,
+                source: Some(&args.source),
+                session: None,
+                mode: Some(args.explicit_mode),
+                context: Some(json!({
+                    "has_hook_event": stdin_json
+                        .get("hook_event_name")
+                        .or_else(|| stdin_json.get("hookEventName"))
+                        .is_some(),
+                    "hook_event": stdin_json
+                        .get("hook_event_name")
+                        .or_else(|| stdin_json.get("hookEventName")),
+                    "tool_name": stdin_json
+                        .get("tool_name")
+                        .or_else(|| stdin_json.get("toolName"))
+                        .or_else(|| stdin_json.get("tool")),
+                    "turn": stdin_json
+                        .get("turn")
+                        .or_else(|| stdin_json.get("turn_id"))
+                        .or_else(|| stdin_json.get("turnId")),
+                })),
+            },
         );
         ctx.source_registry
             .parse_or_fallback(stdin_json, &ctx_parse)
     };
     append_runtime_log(
         ctx.log.as_ref(),
-        "runtime_send",
-        "send.hook_normalized",
-        "hook event normalized",
-        None,
-        Some(&source),
-        Some(&event.session),
-        event.suggested_mode,
-        Some(json!({
-            "normalized_source": event.source.0,
-            "raw_event": event.raw_event,
-            "raw_tool": event.raw_tool,
-            "capability": format!("{:?}", event.capability),
-            "suggested_mode": event.suggested_mode,
-            "turn": event.turn,
-            "event_session": event.session,
-            "event_cwd": event.cwd,
-        })),
+        RuntimeLogEvent {
+            kind: "runtime_send",
+            phase: "send.hook_normalized",
+            message: "hook event normalized",
+            code: None,
+            source: Some(&args.source),
+            session: Some(&event.session),
+            mode: event.suggested_mode,
+            context: Some(json!({
+                "normalized_source": event.source.0,
+                "raw_event": event.raw_event,
+                "raw_tool": event.raw_tool,
+                "capability": format!("{:?}", event.capability),
+                "suggested_mode": event.suggested_mode,
+                "turn": event.turn,
+                "event_session": event.session,
+                "event_cwd": event.cwd,
+            })),
+        },
     );
 
     // 最终 mode 的决策顺序必须固定：
     // manual -> explicit off -> suggested_mode -> capability 映射 -> explicit_mode 兜底。
     let resolved_mode = resolve_mode(&ctx_parse, &event);
-    let resolved_session = if session == "auto" {
+    let resolved_session = if args.session == "auto" {
         event.session.clone()
     } else {
-        session
+        args.session
     };
     append_runtime_log(
         ctx.log.as_ref(),
-        "runtime_send",
-        "send.mode_resolved",
-        "mode resolved",
-        None,
-        Some(&source),
-        Some(&resolved_session),
-        Some(resolved_mode),
-        Some(json!({
-            "resolved_mode": resolved_mode,
-            "resolved_session": resolved_session,
-            "explicit_mode": explicit_mode,
-            "suggested_mode": event.suggested_mode,
-            "capability": format!("{:?}", event.capability),
-            "raw_event": event.raw_event,
-        })),
+        RuntimeLogEvent {
+            kind: "runtime_send",
+            phase: "send.mode_resolved",
+            message: "mode resolved",
+            code: None,
+            source: Some(&args.source),
+            session: Some(&resolved_session),
+            mode: Some(resolved_mode),
+            context: Some(json!({
+                "resolved_mode": resolved_mode,
+                "resolved_session": resolved_session,
+                "explicit_mode": args.explicit_mode,
+                "suggested_mode": event.suggested_mode,
+                "capability": format!("{:?}", event.capability),
+                "raw_event": event.raw_event,
+            })),
+        },
     );
 
     let payload = SendPayload {
         mode: resolved_mode,
-        source: source.clone(),
+        source: args.source.clone(),
         session: resolved_session.clone(),
-        ttl,
-        hook_id: Some(hook_id),
+        ttl: args.ttl,
+        hook_id: Some(args.hook_id),
         raw_event: event.raw_event.clone(),
         raw_tool: event.raw_tool.clone(),
         capability: Some(event.capability.clone()),
@@ -376,74 +380,82 @@ async fn run_send(
     let request = IpcRequestEnvelope::new(IpcRequestPayload::Send(payload));
     append_runtime_log(
         ctx.log.as_ref(),
-        "runtime_send",
-        "send.ipc_dispatch",
-        "dispatching ipc send request",
-        None,
-        Some(&source),
-        Some(&resolved_session),
-        Some(resolved_mode),
-        Some(json!({
-            "request_id": request.request_id,
-            "payload": request.payload,
-        })),
+        RuntimeLogEvent {
+            kind: "runtime_send",
+            phase: "send.ipc_dispatch",
+            message: "dispatching ipc send request",
+            code: None,
+            source: Some(&args.source),
+            session: Some(&resolved_session),
+            mode: Some(resolved_mode),
+            context: Some(json!({
+                "request_id": request.request_id,
+                "payload": request.payload,
+            })),
+        },
     );
     match request_with_auto_start(&ctx, request).await {
         Ok(response) if response.ok => {
             append_runtime_log(
                 ctx.log.as_ref(),
-                "runtime_send",
-                "send.completed",
-                "ipc send request completed successfully",
-                None,
-                Some(&source),
-                Some(&resolved_session),
-                Some(resolved_mode),
-                Some(json!({
-                    "response_message": response.message,
-                    "response_data": response.data,
-                })),
+                RuntimeLogEvent {
+                    kind: "runtime_send",
+                    phase: "send.completed",
+                    message: "ipc send request completed successfully",
+                    code: None,
+                    source: Some(&args.source),
+                    session: Some(&resolved_session),
+                    mode: Some(resolved_mode),
+                    context: Some(json!({
+                        "response_message": response.message,
+                        "response_data": response.data,
+                    })),
+                },
             );
             Ok(CommandOutput::Silent)
         }
         Ok(response) => {
             append_runtime_log(
                 ctx.log.as_ref(),
-                "runtime_send",
-                "send.application_error",
-                "ipc send request returned application error",
-                response.code.as_deref(),
-                Some(&source),
-                Some(&resolved_session),
-                Some(resolved_mode),
-                Some(json!({
-                    "response_code": response.code,
-                    "response_message": response.message,
-                    "response_data": response.data,
-                })),
+                RuntimeLogEvent {
+                    kind: "runtime_send",
+                    phase: "send.application_error",
+                    message: "ipc send request returned application error",
+                    code: response.code.as_deref(),
+                    source: Some(&args.source),
+                    session: Some(&resolved_session),
+                    mode: Some(resolved_mode),
+                    context: Some(json!({
+                        "response_code": response.code,
+                        "response_message": response.message,
+                        "response_data": response.data,
+                    })),
+                },
             );
             let err = AppError::new(
                 response.code.unwrap_or_else(|| "ipc_request_failed".into()),
                 response.message,
             );
-            handle_send_failure(err, quiet, strict)
+            handle_send_failure(err, args.quiet, args.strict)
         }
         Err(err) => {
             append_runtime_log(
                 ctx.log.as_ref(),
-                "runtime_send",
-                "send.transport_error",
-                "ipc transport failed",
-                Some(&err.code),
-                Some(&source),
-                Some(&resolved_session),
-                Some(resolved_mode),
-                Some(json!({
-                    "error_code": err.code,
-                    "error_message": err.message,
-                })),
+                RuntimeLogEvent {
+                    kind: "runtime_send",
+                    phase: "send.transport_error",
+                    message: "ipc transport failed",
+                    code: Some(&err.code),
+                    source: Some(&args.source),
+                    session: Some(&resolved_session),
+                    mode: Some(resolved_mode),
+                    context: Some(json!({
+                        "error_code": err.code,
+                        "error_message": err.message,
+                    })),
+                },
             );
-            handle_send_failure(err, quiet, strict)
+            handle_send_failure(err, args.quiet, args.strict)
         }
     }
 }
@@ -531,7 +543,7 @@ async fn run_install(
     let scope = dir
         .map(InstallScope::Project)
         .unwrap_or(InstallScope::Global);
-    let config_path = adapter.config_path(&scope);
+    let config_path = adapter.config_path(&scope)?;
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent).map_err(|err| AppError::io("create target config dir", err))?;
     }
@@ -576,7 +588,7 @@ async fn run_uninstall(
     let scope = dir
         .map(InstallScope::Project)
         .unwrap_or(InstallScope::Global);
-    let config_path = adapter.config_path(&scope);
+    let config_path = adapter.config_path(&scope)?;
     let config = read_json_or_empty(&config_path)?;
     if config_path.exists() {
         backup_if_exists(&config_path)?;
@@ -598,16 +610,18 @@ async fn request_with_auto_start(
         Ok(response) => {
             append_runtime_log(
                 ctx.log.as_ref(),
-                "runtime_ipc",
-                "ipc.initial_success",
-                "initial ipc request succeeded",
-                None,
-                None,
-                None,
-                None,
-                Some(json!({
-                    "request_id": request.request_id,
-                })),
+                RuntimeLogEvent {
+                    kind: "runtime_ipc",
+                    phase: "ipc.initial_success",
+                    message: "initial ipc request succeeded",
+                    code: None,
+                    source: None,
+                    session: None,
+                    mode: None,
+                    context: Some(json!({
+                        "request_id": request.request_id,
+                    })),
+                },
             );
             Ok(response)
         }
@@ -615,37 +629,41 @@ async fn request_with_auto_start(
             // 首次请求失败时尝试自动拉起 daemon，符合“普通用户开箱即用”的目标。
             append_runtime_log(
                 ctx.log.as_ref(),
-                "runtime_ipc",
-                "ipc.initial_failed",
-                "initial ipc request failed, attempting daemon auto-start",
-                None,
-                None,
-                None,
-                None,
-                Some(json!({
-                    "request_id": request.request_id,
-                })),
+                RuntimeLogEvent {
+                    kind: "runtime_ipc",
+                    phase: "ipc.initial_failed",
+                    message: "initial ipc request failed, attempting daemon auto-start",
+                    code: None,
+                    source: None,
+                    session: None,
+                    mode: None,
+                    context: Some(json!({
+                        "request_id": request.request_id,
+                    })),
+                },
             );
             ensure_daemon_running(ctx).await?;
             let retried = ctx.ipc_client().request(request).await;
             append_runtime_log(
                 ctx.log.as_ref(),
-                "runtime_ipc",
-                if retried.is_ok() {
-                    "ipc.retry_success"
-                } else {
-                    "ipc.retry_failed"
+                RuntimeLogEvent {
+                    kind: "runtime_ipc",
+                    phase: if retried.is_ok() {
+                        "ipc.retry_success"
+                    } else {
+                        "ipc.retry_failed"
+                    },
+                    message: if retried.is_ok() {
+                        "retry ipc request after auto-start succeeded"
+                    } else {
+                        "retry ipc request after auto-start failed"
+                    },
+                    code: None,
+                    source: None,
+                    session: None,
+                    mode: None,
+                    context: None,
                 },
-                if retried.is_ok() {
-                    "retry ipc request after auto-start succeeded"
-                } else {
-                    "retry ipc request after auto-start failed"
-                },
-                None,
-                None,
-                None,
-                None,
-                None,
             );
             retried
         }
@@ -653,33 +671,40 @@ async fn request_with_auto_start(
 }
 
 async fn ensure_daemon_running(ctx: &AppContext) -> AppResult<()> {
-    // 先做 pid 健康检查：如果已有 daemon 进程仍然活着，就不要重复拉起新实例。
-    // 这能避免 IPC 短暂失败或启动窗口期导致多个 daemon 争抢设备与 runtime 文件。
+    // 先做 pid 健康检查：只有“pid 仍活着且 IPC 真能响应”时，
+    // 才把它当成可复用 daemon，避免 pid 被复用时卡死自动恢复流程。
     if let Some(pid) = ctx.runtime.read_pid()? {
-        if process_is_alive(pid)? {
+        if process_is_alive(pid)? && daemon_ipc_ready(ctx).await {
             append_runtime_log(
                 ctx.log.as_ref(),
-                "runtime_daemon_boot",
-                "daemon_boot.healthcheck_alive",
-                "daemon health check found alive pid",
-                None,
-                None,
-                None,
-                None,
-                Some(json!({ "pid": pid })),
+                RuntimeLogEvent {
+                    kind: "runtime_daemon_boot",
+                    phase: "daemon_boot.healthcheck_alive",
+                    message: "daemon health check found alive pid with ready ipc",
+                    code: None,
+                    source: None,
+                    session: None,
+                    mode: None,
+                    context: Some(json!({ "pid": pid })),
+                },
             );
             return Ok(());
         }
         append_runtime_log(
             ctx.log.as_ref(),
-            "runtime_daemon_boot",
-            "daemon_boot.healthcheck_stale",
-            "daemon health check found stale pid, clearing runtime markers",
-            None,
-            None,
-            None,
-            None,
-            Some(json!({ "pid": pid })),
+            RuntimeLogEvent {
+                kind: "runtime_daemon_boot",
+                phase: "daemon_boot.healthcheck_stale",
+                message: "daemon health check found stale or unreachable pid, clearing runtime markers",
+                code: None,
+                source: None,
+                session: None,
+                mode: None,
+                context: Some(json!({
+                    "pid": pid,
+                    "alive": process_is_alive(pid)?,
+                })),
+            },
         );
         let _ = ctx.runtime.clear_pid();
         let _ = ctx.runtime.clear_ipc_info();
@@ -688,16 +713,18 @@ async fn ensure_daemon_running(ctx: &AppContext) -> AppResult<()> {
     let exe = std::env::current_exe().map_err(|err| AppError::io("resolve current exe", err))?;
     append_runtime_log(
         ctx.log.as_ref(),
-        "runtime_daemon_boot",
-        "daemon_boot.spawn",
-        "spawning background daemon",
-        None,
-        None,
-        None,
-        None,
-        Some(json!({
-            "exe": exe,
-        })),
+        RuntimeLogEvent {
+            kind: "runtime_daemon_boot",
+            phase: "daemon_boot.spawn",
+            message: "spawning background daemon",
+            code: None,
+            source: None,
+            session: None,
+            mode: None,
+            context: Some(json!({
+                "exe": exe,
+            })),
+        },
     );
     ctx.platform.spawn_background_daemon(&exe)?;
 
@@ -707,14 +734,16 @@ async fn ensure_daemon_running(ctx: &AppContext) -> AppResult<()> {
         if ctx.ipc_client().request(probe).await.is_ok() {
             append_runtime_log(
                 ctx.log.as_ref(),
-                "runtime_daemon_boot",
-                "daemon_boot.ready",
-                "daemon became ready after auto-start",
-                None,
-                None,
-                None,
-                None,
-                None,
+                RuntimeLogEvent {
+                    kind: "runtime_daemon_boot",
+                    phase: "daemon_boot.ready",
+                    message: "daemon became ready after auto-start",
+                    code: None,
+                    source: None,
+                    session: None,
+                    mode: None,
+                    context: None,
+                },
             );
             return Ok(());
         }
@@ -722,21 +751,28 @@ async fn ensure_daemon_running(ctx: &AppContext) -> AppResult<()> {
 
     append_runtime_log(
         ctx.log.as_ref(),
-        "runtime_daemon_boot",
-        "daemon_boot.timeout",
-        "daemon did not become ready after auto-start timeout window",
-        Some("ipc_unavailable"),
-        None,
-        None,
-        None,
-        Some(json!({
-            "timeout_ms": 3000,
-        })),
+        RuntimeLogEvent {
+            kind: "runtime_daemon_boot",
+            phase: "daemon_boot.timeout",
+            message: "daemon did not become ready after auto-start timeout window",
+            code: Some("ipc_unavailable"),
+            source: None,
+            session: None,
+            mode: None,
+            context: Some(json!({
+                "timeout_ms": 3000,
+            })),
+        },
     );
     Err(AppError::new(
         "ipc_unavailable",
         "daemon did not become ready after auto-start",
     ))
+}
+
+async fn daemon_ipc_ready(ctx: &AppContext) -> bool {
+    let probe = IpcRequestEnvelope::new(IpcRequestPayload::Status { verbose: false });
+    ctx.ipc_client().request(probe).await.is_ok()
 }
 
 /// 检查指定 pid 当前是否仍然存活。
@@ -750,7 +786,7 @@ fn is_process_alive(pid: u32) -> AppResult<bool> {
             .arg(pid.to_string())
             .status()
             .map_err(|err| AppError::io("check daemon pid with kill -0", err))?;
-        return Ok(status.success());
+        Ok(status.success())
     }
 
     #[cfg(windows)]

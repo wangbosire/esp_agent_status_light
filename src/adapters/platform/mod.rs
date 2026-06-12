@@ -29,21 +29,46 @@ pub fn current_platform() -> Box<dyn PlatformAdapter> {
     }
 }
 
+/// 解析当前用户 home 目录。
+pub(crate) fn user_home_dir() -> AppResult<PathBuf> {
+    if let Ok(home) = env::var("HOME") {
+        return Ok(StdPathBuf::from(home));
+    }
+    if let Ok(profile) = env::var("USERPROFILE") {
+        return Ok(StdPathBuf::from(profile));
+    }
+    if let (Ok(drive), Ok(path)) = (env::var("HOMEDRIVE"), env::var("HOMEPATH")) {
+        return Ok(StdPathBuf::from(format!("{drive}{path}")));
+    }
+    Err(AppError::new(
+        "missing_home_dir",
+        "HOME, USERPROFILE, or HOMEDRIVE/HOMEPATH is not set",
+    ))
+}
+
 /// 计算 Unix/macOS 平台默认 runtime 根目录。
-pub(crate) fn unix_runtime_root() -> PathBuf {
+pub(crate) fn unix_runtime_root() -> AppResult<PathBuf> {
     // Unix/macOS 当前共用同一 runtime 目录策略。
-    env::var("HOME")
-        .map(StdPathBuf::from)
-        .unwrap_or_else(|_| StdPathBuf::from("."))
-        .join(".esp-agent-status-light")
+    let home = user_home_dir()?;
+    Ok(home.join(".esp-agent-status-light"))
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
-pub(crate) fn windows_runtime_root() -> PathBuf {
-    env::var("LOCALAPPDATA")
+pub(crate) fn windows_runtime_root() -> AppResult<PathBuf> {
+    let appdata = env::var("LOCALAPPDATA")
         .map(StdPathBuf::from)
-        .unwrap_or_else(|_| StdPathBuf::from("."))
-        .join("AgentStatusLight")
+        .or_else(|_| env::var("APPDATA").map(StdPathBuf::from))
+        .or_else(|_| {
+            env::var("USERPROFILE")
+                .map(|value| StdPathBuf::from(value).join("AppData").join("Local"))
+        })
+        .map_err(|_| {
+            AppError::new(
+                "missing_appdata_dir",
+                "LOCALAPPDATA, APPDATA, or USERPROFILE is not set",
+            )
+        })?;
+    Ok(appdata.join("AgentStatusLight"))
 }
 
 /// 将命令渲染为 POSIX shell 可直接执行的字符串。

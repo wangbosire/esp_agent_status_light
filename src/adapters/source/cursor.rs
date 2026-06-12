@@ -96,9 +96,10 @@ fn map_cursor_mode(
             "error" | "aborted" => (AgentCapability::Failed, Some(Mode::Error)),
             _ => (AgentCapability::Succeeded, Some(Mode::Success)),
         },
-        "sessionEnd" => match reason.unwrap_or_default() {
-            _ => (AgentCapability::Idle, Some(Mode::Demo)),
-        },
+        "sessionEnd" => {
+            let _ = reason;
+            (AgentCapability::Idle, Some(Mode::Demo))
+        }
         "workspaceOpen" => (AgentCapability::Idle, Some(Mode::Demo)),
         _ => (AgentCapability::Unknown, None),
     }

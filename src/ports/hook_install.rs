@@ -16,7 +16,7 @@ pub trait HookInstallAdapter: Send + Sync {
     /// 返回目标工具名。
     fn target(&self) -> &'static str;
     /// 根据全局 / 项目级安装范围计算配置文件路径。
-    fn config_path(&self, scope: &InstallScope) -> std::path::PathBuf;
+    fn config_path(&self, scope: &InstallScope) -> AppResult<std::path::PathBuf>;
     /// 生成该工具所需的全部 Hook 规则。
     fn hook_specs(&self, exe: &Path) -> Vec<HookSpec>;
     /// 将 Hook 规则写入宿主工具配置格式。

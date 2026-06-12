@@ -368,7 +368,7 @@ pub struct DeviceInfo {
 }
 
 /// `status --verbose` 中用于展示 BLE 连接健康度的快照。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DeviceHealth {
     /// 当前是否已建立可用连接。
     pub connected: bool,
@@ -380,18 +380,6 @@ pub struct DeviceHealth {
     pub last_write_at: Option<DateTime<Utc>>,
     /// 最近一次成功写入的模式。
     pub last_mode: Option<Mode>,
-}
-
-impl Default for DeviceHealth {
-    fn default() -> Self {
-        Self {
-            connected: false,
-            device_name: None,
-            last_error: None,
-            last_write_at: None,
-            last_mode: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -422,6 +410,52 @@ pub struct LogEvent {
     /// 结构化上下文，承载 hook、tool、turn、request_id、流程节点等关键排障信息。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<Value>,
+}
+
+/// 运行链路日志事件。
+///
+/// 与直接面向用户的 `LogEvent` 不同，这个结构用于调用点以借用字段的方式
+/// 描述一次 runtime 节点记录，再统一转换成可落盘的 `LogEvent`。
+#[derive(Debug, Clone)]
+pub struct RuntimeLogEvent<'a> {
+    /// 日志事件类型，用于分类和筛选。
+    pub kind: &'a str,
+    /// 日志事件阶段，用于定位处理路径。
+    pub phase: &'a str,
+    /// 日志事件消息，用于面向人类排障。
+    pub message: &'a str,
+    /// 稳定错误码；存在时会把日志级别提升为 `warn`。
+    pub code: Option<&'a str>,
+    /// 日志事件来源。
+    pub source: Option<&'a str>,
+    /// 日志事件会话。
+    pub session: Option<&'a str>,
+    /// 日志事件模式。
+    pub mode: Option<Mode>,
+    /// 结构化补充信息，会写入最终 `LogEvent.context` 字段。
+    pub context: Option<Value>,
+}
+
+impl RuntimeLogEvent<'_> {
+    /// 转换成用于实际落盘的拥有型 `LogEvent`。
+    pub fn into_log_event(self) -> LogEvent {
+        LogEvent {
+            timestamp: Utc::now(),
+            level: if self.code.is_some() {
+                "warn".into()
+            } else {
+                "info".into()
+            },
+            kind: self.kind.into(),
+            message: self.message.into(),
+            phase: Some(self.phase.into()),
+            code: self.code.map(ToOwned::to_owned),
+            source: self.source.map(ToOwned::to_owned),
+            session: self.session.map(ToOwned::to_owned),
+            mode: self.mode,
+            context: self.context,
+        }
+    }
 }
 
 /// daemon 启动后写入 runtime 目录的 IPC 元信息。

@@ -6,6 +6,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use crate::adapters::install::{codex_like_uninstall, decorate_command_fields};
+use crate::adapters::platform::user_home_dir;
 use crate::model::{AppResult, HookCommand, HookSpec, InstallScope, Mode};
 use crate::ports::hook_install::HookInstallAdapter;
 use crate::ports::platform::PlatformAdapter;
@@ -18,11 +19,11 @@ impl HookInstallAdapter for CodexInstallAdapter {
         "codex"
     }
 
-    fn config_path(&self, scope: &InstallScope) -> PathBuf {
-        match scope {
-            InstallScope::Global => dirs_home().join(".codex").join("hooks.json"),
+    fn config_path(&self, scope: &InstallScope) -> AppResult<PathBuf> {
+        Ok(match scope {
+            InstallScope::Global => user_home_dir()?.join(".codex").join("hooks.json"),
             InstallScope::Project(root) => root.join(".codex").join("hooks.json"),
-        }
+        })
     }
 
     fn hook_specs(&self, exe: &Path) -> Vec<HookSpec> {
@@ -121,16 +122,6 @@ fn spec(exe: &Path, event: &str, matcher: Option<&str>, mode: Mode, ttl: u64) ->
             ],
         },
     }
-}
-
-/// 返回当前用户 home 目录。
-///
-/// 第一阶段直接依赖环境变量，保持实现简单透明。
-fn dirs_home() -> PathBuf {
-    // 保持实现简单：第一阶段直接依赖 HOME，后续如需更复杂目录策略再扩展平台层。
-    std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."))
 }
 
 // 测试实现拆到独立目录，避免与 Codex Hook 安装逻辑混写在同一个文件里。

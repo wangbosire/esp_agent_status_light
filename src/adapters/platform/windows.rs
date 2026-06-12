@@ -15,7 +15,7 @@ use crate::ports::platform::PlatformAdapter;
 pub struct WindowsAdapter;
 
 impl PlatformAdapter for WindowsAdapter {
-    fn runtime_root(&self) -> PathBuf {
+    fn runtime_root(&self) -> AppResult<PathBuf> {
         windows_runtime_root()
     }
 

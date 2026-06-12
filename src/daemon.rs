@@ -6,13 +6,13 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use serde_json::{Value, json};
+use serde_json::json;
 use tokio::sync::{Mutex, watch};
 use tokio::time::{Duration, sleep};
 
 use crate::model::{
     AppError, AppResult, DeviceHealth, IpcRequestEnvelope, IpcRequestPayload, IpcResponseEnvelope,
-    LogEvent, Mode, SendPayload, StatusResponse,
+    LogEvent, Mode, RuntimeLogEvent, SendPayload, StatusResponse,
 };
 use crate::ports::device::LightDevice;
 use crate::ports::ipc::{IpcRequestHandler, IpcServer};
@@ -212,45 +212,45 @@ impl Daemon {
     /// 状态补写由调用方在适当时机通过 `sync_effective_mode(true)` 完成。
     async fn try_connect_device(&self) -> AppResult<()> {
         // 连接能力完全委托给 device adapter，本层只关心成功或失败。
-        self.append_runtime_log(
-            "runtime_ble",
-            "ble.connect_attempt",
-            "attempting device connect",
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
+        self.append_runtime_log(RuntimeLogEvent {
+            kind: "runtime_ble",
+            phase: "ble.connect_attempt",
+            message: "attempting device connect",
+            code: None,
+            source: None,
+            session: None,
+            mode: None,
+            context: None,
+        });
         let mut device = self.device.lock().await;
         match device.connect().await {
             Ok(_) => {
-                self.append_runtime_log(
-                    "runtime_ble",
-                    "ble.connect_success",
-                    "device connect succeeded",
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                );
+                self.append_runtime_log(RuntimeLogEvent {
+                    kind: "runtime_ble",
+                    phase: "ble.connect_success",
+                    message: "device connect succeeded",
+                    code: None,
+                    source: None,
+                    session: None,
+                    mode: None,
+                    context: None,
+                });
                 Ok(())
             }
             Err(err) => {
-                self.append_runtime_log(
-                    "runtime_ble",
-                    "ble.connect_failed",
-                    "device connect failed",
-                    Some(&err.code),
-                    None,
-                    None,
-                    None,
-                    Some(json!({
+                self.append_runtime_log(RuntimeLogEvent {
+                    kind: "runtime_ble",
+                    phase: "ble.connect_failed",
+                    message: "device connect failed",
+                    code: Some(&err.code),
+                    source: None,
+                    session: None,
+                    mode: None,
+                    context: Some(json!({
                         "error_code": err.code,
                         "error_message": err.message,
                     })),
-                );
+                });
                 Err(err)
             }
         }
@@ -265,35 +265,35 @@ impl Daemon {
             let router = self.router.lock().await;
             router.effective_mode(Utc::now())
         };
-        self.append_runtime_log(
-            "runtime_ble",
-            "ble.sync_started",
-            "sync_effective_mode started",
-            None,
-            None,
-            None,
-            Some(effective),
-            Some(json!({
+        self.append_runtime_log(RuntimeLogEvent {
+            kind: "runtime_ble",
+            phase: "ble.sync_started",
+            message: "sync_effective_mode started",
+            code: None,
+            source: None,
+            session: None,
+            mode: Some(effective),
+            context: Some(json!({
                 "effective": effective,
                 "force_write": force_write,
             })),
-        );
+        });
 
         let mut device = self.device.lock().await;
         let health = device.health().await;
         if !health.connected {
-            self.append_runtime_log(
-                "runtime_ble",
-                "ble.reconnect_before_write",
-                "device was disconnected during sync, reconnecting before write",
-                None,
-                None,
-                None,
-                Some(effective),
-                Some(json!({
+            self.append_runtime_log(RuntimeLogEvent {
+                kind: "runtime_ble",
+                phase: "ble.reconnect_before_write",
+                message: "device was disconnected during sync, reconnecting before write",
+                code: None,
+                source: None,
+                session: None,
+                mode: Some(effective),
+                context: Some(json!({
                     "effective": effective,
                 })),
-            );
+            });
             device.connect().await?;
         }
 
@@ -301,37 +301,37 @@ impl Daemon {
         // 但如果设备刚刚重连，即使 mode 没变化，也必须强制补写一次当前 effective mode。
         let mut last_applied = self.last_applied_mode.lock().await;
         if !force_write && health.connected && last_applied.is_some_and(|mode| mode == effective) {
-            self.append_runtime_log(
-                "runtime_ble",
-                "ble.write_skipped_unchanged",
-                "skipped BLE write because effective mode did not change",
-                None,
-                None,
-                None,
-                Some(effective),
-                Some(json!({
+            self.append_runtime_log(RuntimeLogEvent {
+                kind: "runtime_ble",
+                phase: "ble.write_skipped_unchanged",
+                message: "skipped BLE write because effective mode did not change",
+                code: None,
+                source: None,
+                session: None,
+                mode: Some(effective),
+                context: Some(json!({
                     "effective": effective,
                     "force_write": force_write,
                 })),
-            );
+            });
             return Ok(());
         }
 
         device.write_mode(effective).await?;
         *last_applied = Some(effective);
         *self.last_ble_write_at.lock().await = Some(Utc::now());
-        self.append_runtime_log(
-            "runtime_ble",
-            "ble.write_success",
-            "BLE write succeeded and last_applied_mode updated",
-            None,
-            None,
-            None,
-            Some(effective),
-            Some(json!({
+        self.append_runtime_log(RuntimeLogEvent {
+            kind: "runtime_ble",
+            phase: "ble.write_success",
+            message: "BLE write succeeded and last_applied_mode updated",
+            code: None,
+            source: None,
+            session: None,
+            mode: Some(effective),
+            context: Some(json!({
                 "effective": effective,
             })),
-        );
+        });
         Ok(())
     }
 
@@ -365,35 +365,10 @@ impl Daemon {
         })
     }
 
-    fn append_runtime_log(
-        &self,
-        kind: &str,
-        phase: &str,
-        message: &str,
-        code: Option<&str>,
-        source: Option<&str>,
-        session: Option<&str>,
-        mode: Option<Mode>,
-        context: Option<Value>,
-    ) {
+    fn append_runtime_log(&self, event: RuntimeLogEvent<'_>) {
         // runtime 日志用于记录链路节点，采用“尽力写入”策略；
         // 即使日志失败，也不能影响 daemon 对外处理状态请求。
-        let _ = self.log.append_runtime(LogEvent {
-            timestamp: Utc::now(),
-            level: if code.is_some() {
-                "warn".into()
-            } else {
-                "info".into()
-            },
-            kind: kind.into(),
-            message: message.into(),
-            phase: Some(phase.into()),
-            code: code.map(ToOwned::to_owned),
-            source: source.map(ToOwned::to_owned),
-            session: session.map(ToOwned::to_owned),
-            mode,
-            context,
-        });
+        let _ = self.log.append_runtime(event.into_log_event());
     }
 
     /// 处理 `send` IPC 请求。
@@ -405,15 +380,15 @@ impl Daemon {
     /// 4. 尝试把 effective mode 写入 BLE；
     /// 5. 根据 BLE 写入结果返回成功或“已接受但设备暂不可用”的响应。
     async fn handle_send(&self, request_id: &str, payload: SendPayload) -> IpcResponseEnvelope {
-        self.append_runtime_log(
-            "runtime_ipc_send",
-            "ipc_send.received",
-            "daemon received send request",
-            None,
-            Some(&payload.source),
-            Some(&payload.session),
-            Some(payload.mode),
-            Some(json!({
+        self.append_runtime_log(RuntimeLogEvent {
+            kind: "runtime_ipc_send",
+            phase: "ipc_send.received",
+            message: "daemon received send request",
+            code: None,
+            source: Some(&payload.source),
+            session: Some(&payload.session),
+            mode: Some(payload.mode),
+            context: Some(json!({
                 "request_id": request_id,
                 "hook_id": payload.hook_id,
                 "raw_event": payload.raw_event,
@@ -424,28 +399,28 @@ impl Daemon {
                 "suggested_mode": payload.suggested_mode,
                 "cwd": payload.cwd,
             })),
-        );
+        });
         let now = Utc::now();
         let effective = {
             let mut router = self.router.lock().await;
             router.apply_send(&payload, now)
         };
-        self.append_runtime_log(
-            "runtime_router",
-            "router.state_applied",
-            "router applied state and resolved effective mode",
-            None,
-            Some(&payload.source),
-            Some(&payload.session),
-            Some(effective),
-            Some(json!({
+        self.append_runtime_log(RuntimeLogEvent {
+            kind: "runtime_router",
+            phase: "router.state_applied",
+            message: "router applied state and resolved effective mode",
+            code: None,
+            source: Some(&payload.source),
+            session: Some(&payload.session),
+            mode: Some(effective),
+            context: Some(json!({
                 "request_id": request_id,
                 "effective_mode": effective,
                 "input_mode": payload.mode,
                 "raw_event": payload.raw_event,
                 "turn": payload.turn,
             })),
-        );
+        });
 
         let _ = self.append_log(
             "ipc_send",
@@ -457,21 +432,21 @@ impl Daemon {
         );
 
         if let Err(err) = self.sync_effective_mode(false).await {
-            self.append_runtime_log(
-                "runtime_ble",
-                "ble.sync_failed",
-                "sync_effective_mode failed",
-                Some(&err.code),
-                Some(&payload.source),
-                Some(&payload.session),
-                Some(effective),
-                Some(json!({
+            self.append_runtime_log(RuntimeLogEvent {
+                kind: "runtime_ble",
+                phase: "ble.sync_failed",
+                message: "sync_effective_mode failed",
+                code: Some(&err.code),
+                source: Some(&payload.source),
+                session: Some(&payload.session),
+                mode: Some(effective),
+                context: Some(json!({
                     "request_id": request_id,
                     "effective_mode": effective,
                     "error_code": err.code,
                     "error_message": err.message,
                 })),
-            );
+            });
             // 路由状态已经接受成功，但 BLE 临时不可用时仍要把“已接受”告诉调用方，
             // 同时附带明确错误码，供 `--strict` 场景感知失败。
             let _ = self.append_log(
@@ -489,19 +464,19 @@ impl Daemon {
             }));
         }
 
-        self.append_runtime_log(
-            "runtime_ipc_send",
-            "ipc_send.completed",
-            "daemon completed send request successfully",
-            None,
-            Some(&payload.source),
-            Some(&payload.session),
-            Some(effective),
-            Some(json!({
+        self.append_runtime_log(RuntimeLogEvent {
+            kind: "runtime_ipc_send",
+            phase: "ipc_send.completed",
+            message: "daemon completed send request successfully",
+            code: None,
+            source: Some(&payload.source),
+            session: Some(&payload.session),
+            mode: Some(effective),
+            context: Some(json!({
                 "request_id": request_id,
                 "effective_mode": effective,
             })),
-        );
+        });
 
         IpcResponseEnvelope::ok(request_id.to_string(), "accepted").with_data(json!({
             "effective": effective,

@@ -25,6 +25,9 @@ struct CodexHookInput {
     tool_response: Option<Value>,
 }
 
+/// Codex Hook 解析器。
+///
+/// 负责把 Codex 提供的 stdin JSON 翻译成统一能力模型与建议模式。
 pub struct CodexAdapter;
 
 impl SourceAdapter for CodexAdapter {
@@ -47,6 +50,7 @@ impl SourceAdapter for CodexAdapter {
     }
 }
 
+/// 将 Codex 原始事件语义映射为统一能力与建议模式。
 fn map_codex_mode(
     raw_event: Option<&str>,
     tool_name: Option<&str>,

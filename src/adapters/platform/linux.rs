@@ -13,6 +13,7 @@ use crate::ports::ipc::IpcTransport;
 use crate::ports::platform::PlatformAdapter;
 
 #[allow(dead_code)]
+/// Linux 平台适配器。
 pub struct LinuxAdapter;
 
 impl PlatformAdapter for LinuxAdapter {

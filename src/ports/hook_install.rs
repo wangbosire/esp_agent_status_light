@@ -1,3 +1,7 @@
+//! Hook 安装端口。
+//!
+//! 每个宿主工具都有自己的配置格式，这一层负责把统一 Hook 规则翻译进去。
+
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -16,6 +20,9 @@ pub trait HookInstallAdapter: Send + Sync {
     /// 生成该工具所需的全部 Hook 规则。
     fn hook_specs(&self, exe: &Path) -> Vec<HookSpec>;
     /// 将 Hook 规则写入宿主工具配置格式。
+    ///
+    /// 输入 `config` 表示用户当前已有配置，实现必须在尽量保留原配置的前提下
+    /// 注入由本工具管理的 Hook 条目。
     fn install(
         &self,
         config: Value,
@@ -24,6 +31,8 @@ pub trait HookInstallAdapter: Send + Sync {
         platform: &dyn PlatformAdapter,
     ) -> AppResult<Value>;
     /// 从宿主工具配置中移除本工具写入的 Hook。
+    ///
+    /// 实现应只删除由当前 `hook_id` 标识的托管条目，避免误伤用户自定义配置。
     fn uninstall(&self, config: Value, hook_id: &str) -> AppResult<Value>;
 }
 
@@ -34,10 +43,12 @@ pub struct HookInstallRegistry {
 }
 
 impl HookInstallRegistry {
+    /// 创建空安装器注册表。
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// 注册一个安装器实现。
     pub fn with<A>(mut self, adapter: A) -> Self
     where
         A: HookInstallAdapter + 'static,
@@ -47,6 +58,9 @@ impl HookInstallRegistry {
         self
     }
 
+    /// 按目标名获取安装器。
+    ///
+    /// 找不到时在这里统一返回稳定错误，命令层无需再自己拼错误文案。
     pub fn get(&self, target: &str) -> AppResult<Arc<dyn HookInstallAdapter>> {
         // 未知目标在这里统一报错，避免命令层了解各家实现细节。
         self.adapters.get(target).cloned().ok_or_else(|| {

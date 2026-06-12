@@ -17,6 +17,7 @@ pub struct MockLightDevice {
 #[async_trait]
 impl LightDevice for MockLightDevice {
     async fn connect(&mut self) -> AppResult<DeviceInfo> {
+        // 测试假设备不做任何真实 IO，只记录“已连接”状态。
         self.connected = true;
         Ok(DeviceInfo {
             name: "MockLightDevice".into(),
@@ -25,6 +26,7 @@ impl LightDevice for MockLightDevice {
     }
 
     async fn write_mode(&mut self, mode: Mode) -> AppResult<()> {
+        // 直接把最后一次写入缓存下来，供测试断言。
         self.mode = Some(mode);
         Ok(())
     }

@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::sync::{Mutex, watch};
 use tokio::time::{Duration, sleep};
 
@@ -40,6 +40,10 @@ pub struct Daemon {
 }
 
 impl Daemon {
+    /// 构造 daemon 实例。
+    ///
+    /// 这里把 runtime/log/device 等外部依赖全部注入进来，
+    /// 让 daemon 本身只负责“协调”和“状态决策”，不直接创建具体 adapter。
     pub fn new(
         runtime: Arc<dyn RuntimeStore>,
         log: Arc<dyn EventLog>,
@@ -59,10 +63,19 @@ impl Daemon {
         })
     }
 
+    /// 为后台任务或 IPC server 生成一个新的 shutdown 接收端。
     pub fn shutdown_receiver(&self) -> watch::Receiver<bool> {
         self.shutdown_tx.subscribe()
     }
 
+    /// 启动 daemon 主循环。
+    ///
+    /// 这个函数会完成：
+    /// 1. runtime 初始化与 pid/ipc 元信息落盘；
+    /// 2. 首次设备连接；
+    /// 3. 过期清理与自动重连后台任务启动；
+    /// 4. IPC server 监听；
+    /// 5. 退出时的收尾、灭灯与 runtime 清理。
     pub async fn run(self: Arc<Self>, server: Arc<dyn IpcServer>) -> AppResult<()> {
         // daemon 启动时先写入运行时元信息，便于命令层自动发现与自恢复。
         self.runtime.ensure_layout()?;
@@ -114,6 +127,10 @@ impl Daemon {
         serve_result
     }
 
+    /// TTL 过期清理后台任务。
+    ///
+    /// 它每秒检查一次状态池，把过期状态移除；
+    /// 如果过期前后的 effective mode 发生变化，则同步更新设备。
     async fn expiry_loop(self: Arc<Self>) {
         let mut shutdown = self.shutdown_receiver();
         loop {
@@ -147,6 +164,10 @@ impl Daemon {
         }
     }
 
+    /// BLE 自动重连后台任务。
+    ///
+    /// 当设备断开时，daemon 不会立刻失败退出，而是按退避序列持续尝试重连，
+    /// 并在重连成功后把当前 effective mode 强制补写回设备。
     async fn reconnect_loop(self: Arc<Self>) {
         let mut shutdown = self.shutdown_receiver();
         // 退避序列从短到长，尽快恢复，也避免长时间断连时疯狂扫描蓝牙。
@@ -185,11 +206,17 @@ impl Daemon {
         }
     }
 
+    /// 尝试建立一次设备连接。
+    ///
+    /// 该函数只负责连接本身，不负责状态同步；
+    /// 状态补写由调用方在适当时机通过 `sync_effective_mode(true)` 完成。
     async fn try_connect_device(&self) -> AppResult<()> {
         // 连接能力完全委托给 device adapter，本层只关心成功或失败。
         self.append_runtime_log(
             "runtime_ble",
+            "ble.connect_attempt",
             "attempting device connect",
+            None,
             None,
             None,
             None,
@@ -200,7 +227,9 @@ impl Daemon {
             Ok(_) => {
                 self.append_runtime_log(
                     "runtime_ble",
+                    "ble.connect_success",
                     "device connect succeeded",
+                    None,
                     None,
                     None,
                     None,
@@ -211,20 +240,26 @@ impl Daemon {
             Err(err) => {
                 self.append_runtime_log(
                     "runtime_ble",
-                    &format!(
-                        "device connect failed: code={}, message={}",
-                        err.code, err.message
-                    ),
+                    "ble.connect_failed",
+                    "device connect failed",
                     Some(&err.code),
                     None,
                     None,
                     None,
+                    Some(json!({
+                        "error_code": err.code,
+                        "error_message": err.message,
+                    })),
                 );
                 Err(err)
             }
         }
     }
 
+    /// 把 router 当前计算出的 effective mode 同步到物理设备。
+    ///
+    /// `force_write=true` 常用于“刚重连完成后补写当前状态”，
+    /// 即使模式没变化也要重新写一次设备，保证灯效和内存状态重新对齐。
     async fn sync_effective_mode(&self, force_write: bool) -> AppResult<()> {
         let effective = {
             let router = self.router.lock().await;
@@ -232,14 +267,16 @@ impl Daemon {
         };
         self.append_runtime_log(
             "runtime_ble",
-            &format!(
-                "sync_effective_mode started: effective={}, force_write={force_write}",
-                effective.as_str()
-            ),
+            "ble.sync_started",
+            "sync_effective_mode started",
             None,
             None,
             None,
             Some(effective),
+            Some(json!({
+                "effective": effective,
+                "force_write": force_write,
+            })),
         );
 
         let mut device = self.device.lock().await;
@@ -247,11 +284,15 @@ impl Daemon {
         if !health.connected {
             self.append_runtime_log(
                 "runtime_ble",
+                "ble.reconnect_before_write",
                 "device was disconnected during sync, reconnecting before write",
                 None,
                 None,
                 None,
                 Some(effective),
+                Some(json!({
+                    "effective": effective,
+                })),
             );
             device.connect().await?;
         }
@@ -262,11 +303,16 @@ impl Daemon {
         if !force_write && health.connected && last_applied.is_some_and(|mode| mode == effective) {
             self.append_runtime_log(
                 "runtime_ble",
+                "ble.write_skipped_unchanged",
                 "skipped BLE write because effective mode did not change",
                 None,
                 None,
                 None,
                 Some(effective),
+                Some(json!({
+                    "effective": effective,
+                    "force_write": force_write,
+                })),
             );
             return Ok(());
         }
@@ -276,15 +322,20 @@ impl Daemon {
         *self.last_ble_write_at.lock().await = Some(Utc::now());
         self.append_runtime_log(
             "runtime_ble",
+            "ble.write_success",
             "BLE write succeeded and last_applied_mode updated",
             None,
             None,
             None,
             Some(effective),
+            Some(json!({
+                "effective": effective,
+            })),
         );
         Ok(())
     }
 
+    /// 追加一条面向事件事实的结构化日志。
     fn append_log(
         &self,
         kind: &str,
@@ -294,7 +345,8 @@ impl Daemon {
         session: Option<&str>,
         mode: Option<Mode>,
     ) -> AppResult<()> {
-        // 统一封装日志构造，避免不同调用点随手写出结构不一致的日志。
+        // 统一封装事件日志构造，避免不同调用点随手写出结构不一致的日志。
+        // 这类日志会同时进入 events.log，属于对外“发生过什么”的事实记录。
         self.log.append(LogEvent {
             timestamp: Utc::now(),
             level: if code.is_some() {
@@ -304,21 +356,25 @@ impl Daemon {
             },
             kind: kind.into(),
             message: message.into(),
+            phase: None,
             code: code.map(ToOwned::to_owned),
             source: source.map(ToOwned::to_owned),
             session: session.map(ToOwned::to_owned),
             mode,
+            context: None,
         })
     }
 
     fn append_runtime_log(
         &self,
         kind: &str,
+        phase: &str,
         message: &str,
         code: Option<&str>,
         source: Option<&str>,
         session: Option<&str>,
         mode: Option<Mode>,
+        context: Option<Value>,
     ) {
         // runtime 日志用于记录链路节点，采用“尽力写入”策略；
         // 即使日志失败，也不能影响 daemon 对外处理状态请求。
@@ -331,24 +387,43 @@ impl Daemon {
             },
             kind: kind.into(),
             message: message.into(),
+            phase: Some(phase.into()),
             code: code.map(ToOwned::to_owned),
             source: source.map(ToOwned::to_owned),
             session: session.map(ToOwned::to_owned),
             mode,
+            context,
         });
     }
 
+    /// 处理 `send` IPC 请求。
+    ///
+    /// 整个流程是：
+    /// 1. 记录收到的原始 payload；
+    /// 2. 交给 router 更新会话状态池；
+    /// 3. 记录“accepted state update”事件日志；
+    /// 4. 尝试把 effective mode 写入 BLE；
+    /// 5. 根据 BLE 写入结果返回成功或“已接受但设备暂不可用”的响应。
     async fn handle_send(&self, request_id: &str, payload: SendPayload) -> IpcResponseEnvelope {
         self.append_runtime_log(
             "runtime_ipc_send",
-            &format!(
-                "daemon received send request: request_id={request_id}, raw_event={:?}, raw_tool={:?}, turn={:?}",
-                payload.raw_event, payload.raw_tool, payload.turn
-            ),
+            "ipc_send.received",
+            "daemon received send request",
             None,
             Some(&payload.source),
             Some(&payload.session),
             Some(payload.mode),
+            Some(json!({
+                "request_id": request_id,
+                "hook_id": payload.hook_id,
+                "raw_event": payload.raw_event,
+                "raw_tool": payload.raw_tool,
+                "turn": payload.turn,
+                "ttl_secs": payload.ttl,
+                "capability": payload.capability.as_ref().map(|value| format!("{value:?}")),
+                "suggested_mode": payload.suggested_mode,
+                "cwd": payload.cwd,
+            })),
         );
         let now = Utc::now();
         let effective = {
@@ -357,14 +432,19 @@ impl Daemon {
         };
         self.append_runtime_log(
             "runtime_router",
-            &format!(
-                "router applied state and resolved effective mode={}",
-                effective.as_str()
-            ),
+            "router.state_applied",
+            "router applied state and resolved effective mode",
             None,
             Some(&payload.source),
             Some(&payload.session),
             Some(effective),
+            Some(json!({
+                "request_id": request_id,
+                "effective_mode": effective,
+                "input_mode": payload.mode,
+                "raw_event": payload.raw_event,
+                "turn": payload.turn,
+            })),
         );
 
         let _ = self.append_log(
@@ -379,14 +459,18 @@ impl Daemon {
         if let Err(err) = self.sync_effective_mode(false).await {
             self.append_runtime_log(
                 "runtime_ble",
-                &format!(
-                    "sync_effective_mode failed: code={}, message={}",
-                    err.code, err.message
-                ),
+                "ble.sync_failed",
+                "sync_effective_mode failed",
                 Some(&err.code),
                 Some(&payload.source),
                 Some(&payload.session),
                 Some(effective),
+                Some(json!({
+                    "request_id": request_id,
+                    "effective_mode": effective,
+                    "error_code": err.code,
+                    "error_message": err.message,
+                })),
             );
             // 路由状态已经接受成功，但 BLE 临时不可用时仍要把“已接受”告诉调用方，
             // 同时附带明确错误码，供 `--strict` 场景感知失败。
@@ -407,11 +491,16 @@ impl Daemon {
 
         self.append_runtime_log(
             "runtime_ipc_send",
+            "ipc_send.completed",
             "daemon completed send request successfully",
             None,
             Some(&payload.source),
             Some(&payload.session),
             Some(effective),
+            Some(json!({
+                "request_id": request_id,
+                "effective_mode": effective,
+            })),
         );
 
         IpcResponseEnvelope::ok(request_id.to_string(), "accepted").with_data(json!({
@@ -419,6 +508,10 @@ impl Daemon {
         }))
     }
 
+    /// 处理 `status` IPC 请求。
+    ///
+    /// verbose 模式下会额外返回当前状态池中的所有来源明细，
+    /// 便于排查“为什么现在显示的是这个状态”。
     async fn handle_status(&self, request_id: &str, verbose: bool) -> IpcResponseEnvelope {
         let now = Utc::now();
         let sources = {
@@ -470,6 +563,10 @@ impl Daemon {
         }
     }
 
+    /// 处理 `stop` IPC 请求。
+    ///
+    /// 这里只负责广播 shutdown 信号并立即返回，
+    /// 真正的停止和清理在 `run()` 的收尾阶段完成。
     async fn handle_stop(&self, request_id: &str) -> IpcResponseEnvelope {
         // stop 采用异步通知模式：先返回 stopping，再由 run() 收尾并真正退出。
         let _ = self.append_log("daemon", "stop requested", None, None, None, None);
@@ -478,6 +575,10 @@ impl Daemon {
     }
 }
 
+/// daemon 作为 IPC handler 的实现入口。
+///
+/// server adapter 只需要把解码后的请求交给这里，
+/// 后续业务分发统一由 daemon 内部完成。
 #[async_trait::async_trait]
 impl IpcRequestHandler for Daemon {
     async fn handle(&self, req: IpcRequestEnvelope) -> IpcResponseEnvelope {

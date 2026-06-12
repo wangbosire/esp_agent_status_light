@@ -21,6 +21,7 @@ struct ClaudeHookInput {
     tool_response: Option<Value>,
 }
 
+/// Claude Hook 解析器。
 pub struct ClaudeAdapter;
 
 impl SourceAdapter for ClaudeAdapter {
@@ -44,6 +45,7 @@ impl SourceAdapter for ClaudeAdapter {
     }
 }
 
+/// 将 Claude Hook 事件映射为统一能力与建议模式。
 fn map_claude_mode(
     raw_event: Option<&str>,
     tool_name: Option<&str>,

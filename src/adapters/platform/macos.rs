@@ -10,6 +10,7 @@ use crate::model::{AppResult, HookCommand};
 use crate::ports::ipc::IpcTransport;
 use crate::ports::platform::PlatformAdapter;
 
+/// macOS 平台适配器。
 pub struct MacosAdapter;
 
 impl PlatformAdapter for MacosAdapter {

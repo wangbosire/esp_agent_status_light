@@ -21,6 +21,7 @@ pub struct UnixSocketTransport {
 }
 
 impl UnixSocketTransport {
+    /// 使用指定 socket 路径创建 IPC 客户端。
     pub fn new(path: PathBuf) -> Self {
         Self { path }
     }
@@ -74,10 +75,12 @@ impl IpcTransport for UnixSocketTransport {
 }
 
 pub struct UnixSocketServer {
+    /// Unix socket 文件路径。
     path: PathBuf,
 }
 
 impl UnixSocketServer {
+    /// 使用指定 socket 路径创建 IPC 服务端。
     pub fn new(path: PathBuf) -> Self {
         Self { path }
     }
@@ -143,6 +146,7 @@ impl IpcServer for UnixSocketServer {
 }
 
 #[cfg(unix)]
+/// 处理单个 Unix socket 连接上的一条请求。
 async fn handle_stream(
     mut stream: UnixStream,
     handler: Arc<dyn IpcRequestHandler>,

@@ -11,6 +11,7 @@ use crate::ports::ipc::IpcTransport;
 use crate::ports::platform::PlatformAdapter;
 
 #[allow(dead_code)]
+/// Windows 平台适配器。
 pub struct WindowsAdapter;
 
 impl PlatformAdapter for WindowsAdapter {

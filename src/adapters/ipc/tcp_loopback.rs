@@ -24,6 +24,7 @@ pub struct TcpLoopbackTransport {
 
 #[allow(dead_code)]
 impl TcpLoopbackTransport {
+    /// 使用指定回环地址创建 TCP IPC 客户端。
     pub fn new(addr: SocketAddr) -> Self {
         Self { addr }
     }
@@ -61,11 +62,13 @@ impl IpcTransport for TcpLoopbackTransport {
 
 #[allow(dead_code)]
 pub struct TcpLoopbackServer {
+    /// 监听地址。
     addr: SocketAddr,
 }
 
 #[allow(dead_code)]
 impl TcpLoopbackServer {
+    /// 使用指定回环地址创建 TCP IPC 服务端。
     pub fn new(addr: SocketAddr) -> Self {
         Self { addr }
     }

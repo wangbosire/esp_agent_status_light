@@ -13,6 +13,7 @@ use std::{env, path::PathBuf as StdPathBuf};
 use crate::model::{AppError, AppResult, HookCommand};
 use crate::ports::platform::PlatformAdapter;
 
+/// 根据当前目标平台选择默认平台适配器。
 pub fn current_platform() -> Box<dyn PlatformAdapter> {
     #[cfg(target_os = "macos")]
     {
@@ -28,6 +29,7 @@ pub fn current_platform() -> Box<dyn PlatformAdapter> {
     }
 }
 
+/// 计算 Unix/macOS 平台默认 runtime 根目录。
 pub(crate) fn unix_runtime_root() -> PathBuf {
     // Unix/macOS 当前共用同一 runtime 目录策略。
     env::var("HOME")
@@ -44,6 +46,7 @@ pub(crate) fn windows_runtime_root() -> PathBuf {
         .join("AgentStatusLight")
 }
 
+/// 将命令渲染为 POSIX shell 可直接执行的字符串。
 pub(crate) fn shell_quote(command: &HookCommand) -> String {
     // POSIX shell quoting：尽量直出安全字符，必要时再用单引号包裹。
     let exe = quote_shell_token(command.exe.to_string_lossy().as_ref());
@@ -77,6 +80,7 @@ pub(crate) fn windows_shell_quote(command: &HookCommand) -> String {
     }
 }
 
+/// 对单个 POSIX shell token 做安全引用。
 pub(crate) fn quote_shell_token(value: &str) -> String {
     if value
         .chars()
@@ -100,6 +104,10 @@ pub(crate) fn quote_windows_token(value: &str) -> String {
     }
 }
 
+/// 以最小依赖方式拉起后台 daemon 进程。
+///
+/// 当前实现统一通过 `esp daemon --foreground` 子进程承载真正服务逻辑，
+/// 外层命令只负责把它从当前终端交互中脱离。
 pub(crate) fn spawn_background(exe: &Path) -> AppResult<()> {
     // 第一阶段使用最朴素的子进程 detach 方式即可，避免引入平台专属后台服务机制。
     Command::new(exe)

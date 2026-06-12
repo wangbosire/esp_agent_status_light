@@ -757,4 +757,6 @@ fn append_log_uses_warn_level_when_error_code_present() {
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].level, "warn");
     assert_eq!(items[0].timestamp <= Utc::now(), true);
+    assert_eq!(items[0].phase, None);
+    assert_eq!(items[0].context, None);
 }

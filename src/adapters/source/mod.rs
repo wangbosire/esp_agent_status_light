@@ -17,6 +17,12 @@ use serde_json::Value;
 use crate::model::{AgentCapability, AgentEvent, AgentSource, HookParseContext, Mode};
 use crate::ports::source::SourceAdapterRegistry;
 
+/// 构建默认来源解析器注册表。
+///
+/// 这里集中声明项目当前支持的 Hook 来源，新增来源时通常只需要：
+/// 1. 新增一个 adapter；
+/// 2. 在这里注册；
+/// 3. 保持 fallback 适配器继续存在。
 pub fn registry() -> SourceAdapterRegistry {
     // 注册顺序本身不影响解析，但 fallback 必须始终存在。
     SourceAdapterRegistry::new()
@@ -60,6 +66,12 @@ pub fn extract_session_or_hash(input: &Value, ctx: &HookParseContext) -> String 
     })
 }
 
+/// 从原始 Hook JSON 中提取工作目录。
+///
+/// 返回的 cwd 主要用于：
+/// 1. 补充 `AgentEvent.cwd`；
+/// 2. 在缺少显式 session 时参与会话标识推断；
+/// 3. 给日志和排障提供上下文。
 pub fn extract_cwd(input: &Value) -> Option<PathBuf> {
     // 优先使用显式 cwd；没有时再退回 workspaceRoots 的第一个根目录。
     string_field(input, &["cwd"])
@@ -75,14 +87,20 @@ pub fn extract_cwd(input: &Value) -> Option<PathBuf> {
         })
 }
 
+/// 提取宿主工具的原始事件名。
 pub fn extract_raw_event(input: &Value) -> Option<String> {
     string_field(input, &["hook_event_name", "hookEventName"])
 }
 
+/// 提取宿主工具的原始工具名。
 pub fn extract_raw_tool(input: &Value) -> Option<String> {
     string_field(input, &["tool_name", "toolName"])
 }
 
+/// 提取当前事件的轮次或工具调用标识。
+///
+/// 这个字段用于帮助排查“当前状态对应的是哪一轮动作”，
+/// 以及未来如果需要引入更精细的会话内覆盖规则时作为稳定依据。
 pub fn extract_turn(input: &Value) -> Option<String> {
     string_field(
         input,
@@ -96,6 +114,9 @@ pub fn extract_turn(input: &Value) -> Option<String> {
     )
 }
 
+/// 依次尝试多个字段名并返回第一个字符串值。
+///
+/// 它主要解决不同宿主工具在 `snake_case` / `camelCase` 上的不一致问题。
 pub fn string_field(input: &Value, names: &[&str]) -> Option<String> {
     // 依次尝试多个可能字段名，兼容 snake_case / camelCase 差异。
     names.iter().find_map(|name| {
@@ -106,6 +127,10 @@ pub fn string_field(input: &Value, names: &[&str]) -> Option<String> {
     })
 }
 
+/// 将来源 adapter 的解析结果组装为统一 `AgentEvent`。
+///
+/// 各 adapter 只需要专注于“如何识别能力与建议模式”，
+/// 通用字段提取与兜底逻辑则在这里统一完成。
 pub fn build_event(
     ctx: &HookParseContext,
     input: &Value,

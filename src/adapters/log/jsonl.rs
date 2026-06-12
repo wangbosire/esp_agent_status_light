@@ -19,6 +19,7 @@ pub struct JsonlLogAdapter {
 }
 
 impl JsonlLogAdapter {
+    /// 使用给定 runtime store 创建 JSONL 日志实现。
     pub fn new(runtime: Arc<dyn RuntimeStore>) -> Self {
         Self { runtime }
     }
@@ -71,6 +72,7 @@ impl EventLog for JsonlLogAdapter {
     }
 }
 
+/// 追加一行 JSONL 到指定日志文件。
 fn append_jsonl_line(path: &Path, line: &str, label: &str) -> AppResult<()> {
     let mut file = OpenOptions::new()
         .create(true)
@@ -80,6 +82,9 @@ fn append_jsonl_line(path: &Path, line: &str, label: &str) -> AppResult<()> {
     writeln!(file, "{line}").map_err(|err| AppError::io(&format!("append {label} log"), err))
 }
 
+/// 将 JSONL 日志裁剪到最近 N 条。
+///
+/// runtime 日志更偏排障用途，因此允许按条数截断来控制文件体积。
 fn trim_jsonl_to_last_n(path: &Path, max_entries: usize, label: &str) -> AppResult<()> {
     let raw =
         fs::read_to_string(path).map_err(|err| AppError::io(&format!("read {label} log"), err))?;

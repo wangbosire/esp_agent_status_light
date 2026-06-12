@@ -10,6 +10,7 @@ use crate::model::{AppResult, HookCommand, HookSpec, InstallScope, Mode};
 use crate::ports::hook_install::HookInstallAdapter;
 use crate::ports::platform::PlatformAdapter;
 
+/// Codex Hook 安装器。
 pub struct CodexInstallAdapter;
 
 impl HookInstallAdapter for CodexInstallAdapter {
@@ -92,6 +93,7 @@ impl HookInstallAdapter for CodexInstallAdapter {
     }
 }
 
+/// 构造一条 Codex Hook 规则定义。
 fn spec(exe: &Path, event: &str, matcher: Option<&str>, mode: Mode, ttl: u64) -> HookSpec {
     // 每条 Hook 都以 `esp send ... --quiet --hook-id agent-status-light` 的稳定形式生成，
     // 便于后续卸载和排障。
@@ -121,6 +123,9 @@ fn spec(exe: &Path, event: &str, matcher: Option<&str>, mode: Mode, ttl: u64) ->
     }
 }
 
+/// 返回当前用户 home 目录。
+///
+/// 第一阶段直接依赖环境变量，保持实现简单透明。
 fn dirs_home() -> PathBuf {
     // 保持实现简单：第一阶段直接依赖 HOME，后续如需更复杂目录策略再扩展平台层。
     std::env::var("HOME")

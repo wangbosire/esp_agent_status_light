@@ -49,6 +49,7 @@ pub struct StateRouter {
 }
 
 impl StateRouter {
+    /// 创建一个空状态路由器。
     pub fn new() -> Self {
         Self::default()
     }
@@ -101,12 +102,20 @@ impl StateRouter {
         self.effective_mode(now)
     }
 
+    /// 移除所有已经到达过期时间的状态。
+    ///
+    /// 过期判断只依赖状态自己的 `expires_at`，不关心来源类型。
     pub fn prune_expired(&mut self, now: DateTime<Utc>) {
         // 过期清理统一集中在这里，避免调用方自己重复写 TTL 判断逻辑。
         self.states
             .retain(|_, state| state.expires_at.is_none_or(|expires_at| expires_at > now));
     }
 
+    /// 计算当前全局应展示的最终模式。
+    ///
+    /// 算法分两步：
+    /// 1. 过滤掉已过期状态；
+    /// 2. 在剩余状态中按“优先级更高、更新时间更近”选出一条。
     pub fn effective_mode(&self, now: DateTime<Utc>) -> Mode {
         // 先按优先级选最高，再按更新时间选最近。
         // 这与技术方案中“展示最重要且最新的状态”保持一致。
@@ -128,6 +137,9 @@ impl StateRouter {
             })
     }
 
+    /// 生成 `status --verbose` 所需的来源状态快照。
+    ///
+    /// 返回值是面向输出协议的稳定结构，不直接暴露内部 `SourceState`。
     pub fn snapshot(&self, now: DateTime<Utc>) -> Vec<StatusSourceEntry> {
         // `status --verbose` 需要查看所有来源明细，因此这里把内部状态转成稳定输出结构。
         let mut items: Vec<_> = self
@@ -158,6 +170,9 @@ impl StateRouter {
         items
     }
 
+    /// 判断同一个 `(source, session)` 的新状态是否应覆盖旧状态。
+    ///
+    /// 当前策略整体偏“最后写入优先”，只保留少量针对 AI 生成态的保护规则。
     fn should_replace(
         &self,
         current: &SourceState,
@@ -195,11 +210,15 @@ impl StateRouter {
     }
 }
 
+/// 将 `std::time::Duration` 转换为 `chrono::Duration`。
 fn duration_to_chrono(duration: std::time::Duration) -> ChronoDuration {
     // `chrono` 与 `std::time` 分属两个世界，这里统一做一次桥接转换。
     ChronoDuration::seconds(duration.as_secs() as i64)
 }
 
+/// 判断是否应保留当前 `ai` 生成态，而不是被泛化的 `busy` 覆盖。
+///
+/// 这是针对某些宿主只上报“工具链继续推进”而不提供明确工具语义时的体验保护。
 fn should_preserve_ai_generation_state(current: &SourceState, candidate: &SourceState) -> bool {
     if current.mode != Mode::Ai || candidate.mode != Mode::Busy {
         return false;

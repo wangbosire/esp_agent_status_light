@@ -14,11 +14,17 @@ use crate::ports::device::LightDevice;
 /// 1. daemon 可以先接受 IPC，再慢慢等待蓝牙恢复。
 /// 2. 即便当前没有连上设备，也要把 health 信息暴露给 `status --verbose`。
 pub struct BtleplugBleAdapter {
+    /// 目标 BLE 设备名称。
     device_name: String,
+    /// 固件暴露的 GATT 服务 UUID。
     service_uuid: Uuid,
+    /// 固件暴露的 mode 特征 UUID。
     mode_char_uuid: Uuid,
+    /// 当前已连接的外围设备。
     peripheral: Option<Peripheral>,
+    /// 已发现的 mode 特征。
     characteristic: Option<Characteristic>,
+    /// 当前缓存的设备健康状态。
     health: DeviceHealth,
 }
 
@@ -166,6 +172,11 @@ impl LightDevice for BtleplugBleAdapter {
 }
 
 impl BtleplugBleAdapter {
+    /// 扫描附近 BLE 设备并选择最佳候选目标。
+    ///
+    /// 当前选择策略很直接：
+    /// 1. 名称或服务 UUID 匹配；
+    /// 2. 若有多个候选，选择 RSSI 最强的设备。
     async fn scan_target(&mut self, adapter: Adapter) -> AppResult<Peripheral> {
         // 第一阶段采用简单全量扫描 + 最佳候选选择策略：
         // 满足“名称匹配或服务 UUID 匹配”即可，再从中选择 RSSI 最强者。

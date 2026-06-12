@@ -1,4 +1,7 @@
 //! 文件系统版 runtime 存储实现。
+//!
+//! 当前项目的 pid、ipc 信息、日志和安装清单都直接落在本地文件系统，
+//! 这是最简单、最稳妥、也最便于用户手动排查的一种实现。
 
 use std::fs;
 use std::path::PathBuf;
@@ -13,15 +16,18 @@ pub struct FsRuntimeAdapter {
 }
 
 impl FsRuntimeAdapter {
+    /// 使用给定根目录创建一个文件系统 runtime 存储。
     pub fn new(root: PathBuf) -> Self {
         Self { root }
     }
 
+    /// 返回 pid 文件路径。
     fn pid_path(&self) -> PathBuf {
         // pid 文件只服务于“已有 daemon 健康检查”和 `stop --force`。
         self.runtime_dir().join("daemon.pid")
     }
 
+    /// 返回 IPC 元信息文件路径。
     fn ipc_info_path(&self) -> PathBuf {
         // 保存当前 IPC 类型和地址，便于 status 输出和命令侧诊断。
         self.runtime_dir().join("ipc.json")

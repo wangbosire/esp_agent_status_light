@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::Utc;
+use serde_json::json;
 
 use super::*;
 use crate::adapters::runtime::fs::FsRuntimeAdapter;
@@ -21,10 +22,15 @@ fn sample_event(index: usize) -> LogEvent {
         level: "info".into(),
         kind: "test".into(),
         message: format!("message-{index}"),
+        phase: Some("test.phase".into()),
         code: None,
         source: Some("test".into()),
         session: Some("session-1".into()),
         mode: Some(Mode::Busy),
+        context: Some(json!({
+            "index": index,
+            "hook_event": "PreToolUse",
+        })),
     }
 }
 
@@ -45,6 +51,8 @@ fn append_writes_both_events_and_runtime_logs() {
         std::fs::read_to_string(runtime.runtime_log_path()).expect("read runtime log");
     assert!(events_raw.contains("message-1"));
     assert!(runtime_raw.contains("message-1"));
+    assert!(runtime_raw.contains("\"phase\":\"test.phase\""));
+    assert!(runtime_raw.contains("\"hook_event\":\"PreToolUse\""));
 
     let _ = std::fs::remove_dir_all(runtime.runtime_root());
 }

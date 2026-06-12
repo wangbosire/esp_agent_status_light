@@ -1,3 +1,7 @@
+//! Hook 来源解析端口。
+//!
+//! 不同宿主工具的 Hook JSON 形状不同，这一层负责把它们收敛到统一事件模型。
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -20,10 +24,14 @@ pub struct SourceAdapterRegistry {
 }
 
 impl SourceAdapterRegistry {
+    /// 创建空注册表。
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// 注册一个来源解析器并返回更新后的注册表。
+    ///
+    /// 采用链式 `with()` 写法，便于在默认注册和测试替换时保持装配代码紧凑。
     pub fn with<A>(mut self, adapter: A) -> Self
     where
         A: SourceAdapter + 'static,
@@ -34,10 +42,15 @@ impl SourceAdapterRegistry {
         self
     }
 
+    /// 根据来源名获取对应解析器。
     pub fn get(&self, source: &str) -> Option<Arc<dyn SourceAdapter>> {
         self.adapters.get(source).cloned()
     }
 
+    /// 先按指定来源尝试解析，失败时回退到兜底解析器。
+    ///
+    /// 这样可以满足“Hook 失败不阻断主流程”的要求：
+    /// 即使某个宿主升级了字段结构，系统也至少还能退回显式 mode 或默认逻辑。
     pub fn parse_or_fallback(&self, input: Value, ctx: &HookParseContext) -> AgentEvent {
         let fallback = self.get("*").expect("fallback adapter must be registered");
 

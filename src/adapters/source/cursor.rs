@@ -32,6 +32,7 @@ struct CursorHookInput {
     cwd: Option<String>,
 }
 
+/// Cursor Hook 解析器。
 pub struct CursorAdapter;
 
 impl SourceAdapter for CursorAdapter {
@@ -55,6 +56,7 @@ impl SourceAdapter for CursorAdapter {
     }
 }
 
+/// 将 Cursor 原始 Hook 事件映射为统一能力与建议模式。
 fn map_cursor_mode(
     raw_event: Option<&str>,
     tool_name: Option<&str>,

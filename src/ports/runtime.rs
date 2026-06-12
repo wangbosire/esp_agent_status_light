@@ -1,3 +1,8 @@
+//! 运行时文件存储端口。
+//!
+//! 该抽象把 pid、ipc 元信息、日志与安装清单的路径规则集中起来，
+//! 让上层逻辑不需要自己拼路径或关心平台目录差异。
+
 use std::path::PathBuf;
 
 use crate::model::{AppResult, InstallManifest, IpcInfo};
@@ -24,11 +29,22 @@ pub trait RuntimeStore: Send + Sync {
     fn default_ipc_path(&self) -> PathBuf;
     /// 确保 runtime 所需目录存在。
     fn ensure_layout(&self) -> AppResult<()>;
+    /// 读取 daemon pid 文件。
+    ///
+    /// 返回 `None` 表示当前没有已知 pid 标记，并不等价于“进程一定不存在”。
     fn read_pid(&self) -> AppResult<Option<u32>>;
+    /// 写入当前 daemon pid。
     fn write_pid(&self, pid: u32) -> AppResult<()>;
+    /// 清理 daemon pid 文件。
     fn clear_pid(&self) -> AppResult<()>;
+    /// 读取当前 daemon 暴露的 IPC 元信息。
     fn read_ipc_info(&self) -> AppResult<Option<IpcInfo>>;
+    /// 写入当前 daemon 暴露的 IPC 元信息。
     fn write_ipc_info(&self, info: &IpcInfo) -> AppResult<()>;
+    /// 清理 IPC 元信息文件。
     fn clear_ipc_info(&self) -> AppResult<()>;
+    /// 记录一次安装动作的最终落盘结果。
+    ///
+    /// 这不是 Hook 真相来源，而是一个便于用户排查的“安装摘要”。
     fn write_install_manifest(&self, manifest: &InstallManifest) -> AppResult<()>;
 }

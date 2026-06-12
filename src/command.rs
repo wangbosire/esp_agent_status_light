@@ -46,14 +46,20 @@ pub enum CommandOutput {
 /// 每次 CLI 调用时临时构建的应用上下文。
 /// 它只持有轻量级适配器和注册表，不在这里保存业务状态。
 struct AppContext {
+    /// Hook 来源解析器注册表。
     source_registry: SourceAdapterRegistry,
+    /// Hook 安装器注册表。
     install_registry: HookInstallRegistry,
+    /// runtime 文件存储适配器。
     runtime: Arc<dyn RuntimeStore>,
+    /// 事件与运行链路日志适配器。
     log: Arc<dyn EventLog>,
+    /// 当前平台差异适配器。
     platform: Box<dyn PlatformAdapter>,
 }
 
 impl AppContext {
+    /// 构建一套默认 CLI 运行所需的适配器集合。
     fn build() -> Self {
         // 所有默认 adapter 装配集中在这里，避免散落在各个命令实现中。
         let platform = adapters::platform::current_platform();
@@ -71,12 +77,16 @@ impl AppContext {
         }
     }
 
+    /// 创建一个面向 daemon 的 IPC 客户端。
     fn ipc_client(&self) -> Box<dyn IpcTransport> {
         // IPC client 每次按平台动态创建，避免跨平台时把传输细节写死。
         self.platform
             .default_ipc_adapter(&self.runtime.default_ipc_path())
     }
 
+    /// 创建当前平台默认的 IPC server。
+    ///
+    /// daemon 进程启动时使用；CLI 普通命令不会直接监听服务。
     fn ipc_server(&self) -> Arc<dyn IpcServer> {
         #[cfg(unix)]
         {
@@ -92,12 +102,17 @@ impl AppContext {
         }
     }
 
+    /// 创建默认物理设备适配器。
     fn device(&self) -> Box<dyn LightDevice> {
         // 当前正式设备只有 BLE 实现；测试场景会直接绕过这里注入 mock。
         Box::new(adapters::device::btleplug_ble::BtleplugBleAdapter::default())
     }
 }
 
+/// CLI 总入口。
+///
+/// 该函数负责把解析后的命令枚举分派到具体处理函数，
+/// 并为每次命令调用重新装配一套轻量上下文。
 pub async fn run(cli: Cli) -> AppResult<CommandOutput> {
     // 每次命令调用都重新构建上下文即可，避免在 CLI 进程内维护多余全局状态。
     let ctx = AppContext::build();
@@ -121,14 +136,19 @@ pub async fn run(cli: Cli) -> AppResult<CommandOutput> {
     }
 }
 
+/// 以“尽力写入”方式追加一条运行链路日志。
+///
+/// 运行链路日志用于定位内部处理路径，不应反过来影响主命令行为。
 fn append_runtime_log(
     log: &dyn EventLog,
     kind: &str,
+    phase: &str,
     message: &str,
     code: Option<&str>,
     source: Option<&str>,
     session: Option<&str>,
     mode: Option<Mode>,
+    context: Option<Value>,
 ) {
     // runtime 日志只用于排查链路问题，因此这里采用“尽力写入”策略：
     // 即使日志失败，也绝不反过来阻塞主功能。
@@ -141,10 +161,12 @@ fn append_runtime_log(
         },
         kind: kind.into(),
         message: message.into(),
+        phase: Some(phase.into()),
         code: code.map(ToOwned::to_owned),
         source: source.map(ToOwned::to_owned),
         session: session.map(ToOwned::to_owned),
         mode,
+        context,
     });
 }
 
@@ -154,7 +176,9 @@ async fn run_daemon(ctx: AppContext, foreground: bool) -> AppResult<CommandOutpu
         append_runtime_log(
             ctx.log.as_ref(),
             "runtime_command",
+            "daemon.background_requested",
             "daemon command requested background startup",
+            None,
             None,
             None,
             None,
@@ -173,7 +197,9 @@ async fn run_daemon(ctx: AppContext, foreground: bool) -> AppResult<CommandOutpu
     append_runtime_log(
         ctx.log.as_ref(),
         "runtime_command",
+        "daemon.foreground_requested",
         "daemon command entering foreground run loop",
+        None,
         None,
         None,
         None,
@@ -200,14 +226,21 @@ async fn run_send(
     append_runtime_log(
         ctx.log.as_ref(),
         "runtime_send",
-        &format!(
-            "send command started: source={source}, session_arg={session}, explicit_mode={}",
-            explicit_mode.as_str()
-        ),
+        "send.received",
+        "send command started",
         None,
         Some(&source),
         None,
         Some(explicit_mode),
+        Some(json!({
+            "session_arg": session,
+            "explicit_mode": explicit_mode,
+            "ttl_secs": ttl,
+            "strict": strict,
+            "quiet": quiet,
+            "hook_id": hook_id,
+            "cwd": current_dir,
+        })),
     );
     let ctx_parse = HookParseContext {
         source: source.clone(),
@@ -222,11 +255,16 @@ async fn run_send(
         append_runtime_log(
             ctx.log.as_ref(),
             "runtime_send",
+            "send.manual_bypass",
             "manual source bypassed hook stdin parsing",
             None,
             Some("manual"),
             Some("manual"),
             Some(explicit_mode),
+            Some(json!({
+                "source": "manual",
+                "reason": "manual_source",
+            })),
         );
         AgentEvent {
             source: AgentSource::new("manual"),
@@ -243,17 +281,29 @@ async fn run_send(
         append_runtime_log(
             ctx.log.as_ref(),
             "runtime_send",
-            &format!(
-                "hook stdin loaded for source={source}, has_hook_event={}",
-                stdin_json
-                    .get("hook_event_name")
-                    .or_else(|| stdin_json.get("hookEventName"))
-                    .is_some()
-            ),
+            "send.stdin_loaded",
+            "hook stdin loaded",
             None,
             Some(&source),
             None,
             Some(explicit_mode),
+            Some(json!({
+                "has_hook_event": stdin_json
+                    .get("hook_event_name")
+                    .or_else(|| stdin_json.get("hookEventName"))
+                    .is_some(),
+                "hook_event": stdin_json
+                    .get("hook_event_name")
+                    .or_else(|| stdin_json.get("hookEventName")),
+                "tool_name": stdin_json
+                    .get("tool_name")
+                    .or_else(|| stdin_json.get("toolName"))
+                    .or_else(|| stdin_json.get("tool")),
+                "turn": stdin_json
+                    .get("turn")
+                    .or_else(|| stdin_json.get("turn_id"))
+                    .or_else(|| stdin_json.get("turnId")),
+            })),
         );
         ctx.source_registry
             .parse_or_fallback(stdin_json, &ctx_parse)
@@ -261,14 +311,22 @@ async fn run_send(
     append_runtime_log(
         ctx.log.as_ref(),
         "runtime_send",
-        &format!(
-            "hook event normalized: raw_event={:?}, raw_tool={:?}, capability={:?}, suggested_mode={:?}, turn={:?}",
-            event.raw_event, event.raw_tool, event.capability, event.suggested_mode, event.turn
-        ),
+        "send.hook_normalized",
+        "hook event normalized",
         None,
         Some(&source),
         Some(&event.session),
         event.suggested_mode,
+        Some(json!({
+            "normalized_source": event.source.0,
+            "raw_event": event.raw_event,
+            "raw_tool": event.raw_tool,
+            "capability": format!("{:?}", event.capability),
+            "suggested_mode": event.suggested_mode,
+            "turn": event.turn,
+            "event_session": event.session,
+            "event_cwd": event.cwd,
+        })),
     );
 
     // 最终 mode 的决策顺序必须固定：
@@ -282,15 +340,20 @@ async fn run_send(
     append_runtime_log(
         ctx.log.as_ref(),
         "runtime_send",
-        &format!(
-            "mode resolved: session={resolved_session}, mode={}, raw_event={:?}",
-            resolved_mode.as_str(),
-            event.raw_event
-        ),
+        "send.mode_resolved",
+        "mode resolved",
         None,
         Some(&source),
         Some(&resolved_session),
         Some(resolved_mode),
+        Some(json!({
+            "resolved_mode": resolved_mode,
+            "resolved_session": resolved_session,
+            "explicit_mode": explicit_mode,
+            "suggested_mode": event.suggested_mode,
+            "capability": format!("{:?}", event.capability),
+            "raw_event": event.raw_event,
+        })),
     );
 
     let payload = SendPayload {
@@ -314,22 +377,32 @@ async fn run_send(
     append_runtime_log(
         ctx.log.as_ref(),
         "runtime_send",
+        "send.ipc_dispatch",
         "dispatching ipc send request",
         None,
         Some(&source),
         Some(&resolved_session),
         Some(resolved_mode),
+        Some(json!({
+            "request_id": request.request_id,
+            "payload": request.payload,
+        })),
     );
     match request_with_auto_start(&ctx, request).await {
         Ok(response) if response.ok => {
             append_runtime_log(
                 ctx.log.as_ref(),
                 "runtime_send",
+                "send.completed",
                 "ipc send request completed successfully",
                 None,
                 Some(&source),
                 Some(&resolved_session),
                 Some(resolved_mode),
+                Some(json!({
+                    "response_message": response.message,
+                    "response_data": response.data,
+                })),
             );
             Ok(CommandOutput::Silent)
         }
@@ -337,14 +410,17 @@ async fn run_send(
             append_runtime_log(
                 ctx.log.as_ref(),
                 "runtime_send",
-                &format!(
-                    "ipc send request returned application error: code={:?}, message={}",
-                    response.code, response.message
-                ),
+                "send.application_error",
+                "ipc send request returned application error",
                 response.code.as_deref(),
                 Some(&source),
                 Some(&resolved_session),
                 Some(resolved_mode),
+                Some(json!({
+                    "response_code": response.code,
+                    "response_message": response.message,
+                    "response_data": response.data,
+                })),
             );
             let err = AppError::new(
                 response.code.unwrap_or_else(|| "ipc_request_failed".into()),
@@ -356,20 +432,26 @@ async fn run_send(
             append_runtime_log(
                 ctx.log.as_ref(),
                 "runtime_send",
-                &format!(
-                    "ipc transport failed: code={}, message={}",
-                    err.code, err.message
-                ),
+                "send.transport_error",
+                "ipc transport failed",
                 Some(&err.code),
                 Some(&source),
                 Some(&resolved_session),
                 Some(resolved_mode),
+                Some(json!({
+                    "error_code": err.code,
+                    "error_message": err.message,
+                })),
             );
             handle_send_failure(err, quiet, strict)
         }
     }
 }
 
+/// 统一处理 `send` 命令失败时的降级策略。
+///
+/// 默认 Hook 语义是“失败不阻断主流程”，因此除非显式启用 `--strict`，
+/// 否则这里会把错误降级为静默或 warning 文本。
 fn handle_send_failure(err: AppError, quiet: bool, strict: bool) -> AppResult<CommandOutput> {
     // Hook 默认是“失败不阻塞主流程”，只有 `--strict` 才把错误向上抛出。
     if strict {
@@ -517,11 +599,15 @@ async fn request_with_auto_start(
             append_runtime_log(
                 ctx.log.as_ref(),
                 "runtime_ipc",
+                "ipc.initial_success",
                 "initial ipc request succeeded",
                 None,
                 None,
                 None,
                 None,
+                Some(json!({
+                    "request_id": request.request_id,
+                })),
             );
             Ok(response)
         }
@@ -530,11 +616,15 @@ async fn request_with_auto_start(
             append_runtime_log(
                 ctx.log.as_ref(),
                 "runtime_ipc",
+                "ipc.initial_failed",
                 "initial ipc request failed, attempting daemon auto-start",
                 None,
                 None,
                 None,
                 None,
+                Some(json!({
+                    "request_id": request.request_id,
+                })),
             );
             ensure_daemon_running(ctx).await?;
             let retried = ctx.ipc_client().request(request).await;
@@ -542,10 +632,16 @@ async fn request_with_auto_start(
                 ctx.log.as_ref(),
                 "runtime_ipc",
                 if retried.is_ok() {
+                    "ipc.retry_success"
+                } else {
+                    "ipc.retry_failed"
+                },
+                if retried.is_ok() {
                     "retry ipc request after auto-start succeeded"
                 } else {
                     "retry ipc request after auto-start failed"
                 },
+                None,
                 None,
                 None,
                 None,
@@ -564,22 +660,26 @@ async fn ensure_daemon_running(ctx: &AppContext) -> AppResult<()> {
             append_runtime_log(
                 ctx.log.as_ref(),
                 "runtime_daemon_boot",
-                &format!("daemon health check found alive pid={pid}"),
+                "daemon_boot.healthcheck_alive",
+                "daemon health check found alive pid",
                 None,
                 None,
                 None,
                 None,
+                Some(json!({ "pid": pid })),
             );
             return Ok(());
         }
         append_runtime_log(
             ctx.log.as_ref(),
             "runtime_daemon_boot",
-            &format!("daemon health check found stale pid={pid}, clearing runtime markers"),
+            "daemon_boot.healthcheck_stale",
+            "daemon health check found stale pid, clearing runtime markers",
             None,
             None,
             None,
             None,
+            Some(json!({ "pid": pid })),
         );
         let _ = ctx.runtime.clear_pid();
         let _ = ctx.runtime.clear_ipc_info();
@@ -589,11 +689,15 @@ async fn ensure_daemon_running(ctx: &AppContext) -> AppResult<()> {
     append_runtime_log(
         ctx.log.as_ref(),
         "runtime_daemon_boot",
+        "daemon_boot.spawn",
         "spawning background daemon",
         None,
         None,
         None,
         None,
+        Some(json!({
+            "exe": exe,
+        })),
     );
     ctx.platform.spawn_background_daemon(&exe)?;
 
@@ -604,7 +708,9 @@ async fn ensure_daemon_running(ctx: &AppContext) -> AppResult<()> {
             append_runtime_log(
                 ctx.log.as_ref(),
                 "runtime_daemon_boot",
+                "daemon_boot.ready",
                 "daemon became ready after auto-start",
+                None,
                 None,
                 None,
                 None,
@@ -617,11 +723,15 @@ async fn ensure_daemon_running(ctx: &AppContext) -> AppResult<()> {
     append_runtime_log(
         ctx.log.as_ref(),
         "runtime_daemon_boot",
+        "daemon_boot.timeout",
         "daemon did not become ready after auto-start timeout window",
         Some("ipc_unavailable"),
         None,
         None,
         None,
+        Some(json!({
+            "timeout_ms": 3000,
+        })),
     );
     Err(AppError::new(
         "ipc_unavailable",
@@ -629,6 +739,9 @@ async fn ensure_daemon_running(ctx: &AppContext) -> AppResult<()> {
     ))
 }
 
+/// 检查指定 pid 当前是否仍然存活。
+///
+/// 这里只做“进程是否存在”的粗粒度探测，不保证该进程一定是正确的 daemon 实例。
 fn is_process_alive(pid: u32) -> AppResult<bool> {
     #[cfg(unix)]
     {
@@ -660,6 +773,9 @@ fn is_process_alive(pid: u32) -> AppResult<bool> {
     }
 }
 
+/// `is_process_alive` 的语义别名。
+///
+/// 保留这层薄封装是为了让调用点代码更贴近业务语义。
 fn process_is_alive(pid: u32) -> AppResult<bool> {
     is_process_alive(pid)
 }
@@ -675,6 +791,10 @@ enum InstallCommandTarget {
 }
 
 impl InstallCommandTarget {
+    /// 返回安装器初始生成 HookSpec 时应使用的可执行文件路径。
+    ///
+    /// 对 `CargoRun` 来说，这里先返回 `cargo`，随后会由 `apply_to_specs`
+    /// 把原始 `send ...` 参数整体改写成 `cargo run -- ...`。
     fn spec_exe(&self) -> &Path {
         match self {
             Self::StableBinary { path } => path.as_path(),
@@ -683,6 +803,7 @@ impl InstallCommandTarget {
         }
     }
 
+    /// 将当前命令策略应用到一组 Hook 规则上。
     fn apply_to_specs(&self, specs: &mut [HookSpec]) {
         if let Self::CargoRun { manifest_path } = self {
             for spec in specs {
@@ -691,6 +812,7 @@ impl InstallCommandTarget {
         }
     }
 
+    /// 返回面向人类展示的命令说明文本。
     fn display_command(&self) -> String {
         match self {
             Self::StableBinary { path } => path.to_string_lossy().to_string(),
@@ -702,6 +824,11 @@ impl InstallCommandTarget {
     }
 }
 
+/// 解析安装时应写入 Hook 配置的命令目标。
+///
+/// 规则是：
+/// 1. 开发阶段若当前进程来自 `cargo run` 的 `target/debug`，优先回写 `cargo run`；
+/// 2. 其它场景统一复制稳定二进制到 runtime/bin，再让 Hook 指向它。
 fn resolve_install_command(runtime: &dyn RuntimeStore) -> AppResult<InstallCommandTarget> {
     let current =
         std::env::current_exe().map_err(|err| AppError::io("resolve current exe", err))?;
@@ -717,6 +844,9 @@ fn resolve_install_command(runtime: &dyn RuntimeStore) -> AppResult<InstallComma
     })
 }
 
+/// 判断当前环境是否更适合把 Hook 安装成 `cargo run -- ...` 形式。
+///
+/// 这样本地开发时改完源码重新运行，已安装的 Hook 会自然跟上当前工作树。
 fn should_use_cargo_run_hooks(current_exe: &Path) -> bool {
     if !cfg!(debug_assertions) {
         return false;
@@ -735,6 +865,7 @@ fn should_use_cargo_run_hooks(current_exe: &Path) -> bool {
             .is_some_and(|name| name == "target")
 }
 
+/// 基于 `cargo run` 生成一条可写入 Hook 配置的命令描述。
 fn build_cargo_run_hook_command(manifest_path: &Path, send_args: &[String]) -> HookCommand {
     let mut args = vec![
         "run".into(),
@@ -749,6 +880,7 @@ fn build_cargo_run_hook_command(manifest_path: &Path, send_args: &[String]) -> H
     }
 }
 
+/// 把当前可执行文件复制到 runtime/bin，供安装后的 Hook 稳定引用。
 fn install_stable_binary(runtime: &dyn RuntimeStore) -> AppResult<PathBuf> {
     runtime.ensure_layout()?;
     let current =
@@ -761,6 +893,10 @@ fn install_stable_binary(runtime: &dyn RuntimeStore) -> AppResult<PathBuf> {
     Ok(target)
 }
 
+/// 读取 JSON 文件；文件不存在时返回空对象。
+///
+/// 这让 install/uninstall 可以把“首次创建配置文件”与“修改既有配置文件”
+/// 统一成同一条代码路径。
 fn read_json_or_empty(path: &Path) -> AppResult<Value> {
     if !path.exists() {
         return Ok(json!({}));
@@ -769,6 +905,7 @@ fn read_json_or_empty(path: &Path) -> AppResult<Value> {
     serde_json::from_str(&raw).map_err(|err| AppError::invalid("parse config json", err))
 }
 
+/// 以格式化 JSON 形式写入配置文件。
 fn write_json(path: &Path, value: &Value) -> AppResult<()> {
     // 所有配置文件统一格式化写出，便于用户手动检查和 diff。
     let raw = serde_json::to_string_pretty(value)
@@ -776,6 +913,7 @@ fn write_json(path: &Path, value: &Value) -> AppResult<()> {
     fs::write(path, raw).map_err(|err| AppError::io("write json file", err))
 }
 
+/// 如果目标配置文件已存在，则先创建一份带时间戳的备份。
 fn backup_if_exists(path: &Path) -> AppResult<()> {
     if !path.exists() {
         return Ok(());
@@ -792,6 +930,9 @@ fn backup_if_exists(path: &Path) -> AppResult<()> {
     Ok(())
 }
 
+/// 从标准输入中尽力读取一份 Hook JSON。
+///
+/// 设计目标是“尽量读到有用上下文，但绝不因 stdin 异常长时间卡住主流程”。
 fn read_stdin_json() -> AppResult<Option<Value>> {
     let stdin = std::io::stdin();
     if stdin.is_terminal() {
@@ -826,6 +967,9 @@ fn read_stdin_json() -> AppResult<Option<Value>> {
     }
 }
 
+/// 在 IPC 不可用时，直接根据 pid 文件发送终止信号。
+///
+/// 这是 `stop --force` 的最后兜底手段，因此只在常规 stop 失败时使用。
 fn force_stop_by_pid(runtime: &dyn RuntimeStore) -> AppResult<()> {
     let pid = runtime
         .read_pid()?

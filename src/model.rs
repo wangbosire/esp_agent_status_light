@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use uuid::Uuid;
 
 /// 项目内部统一错误类型。
@@ -16,11 +17,20 @@ use uuid::Uuid;
 /// 3. 单元测试直接断言错误语义，而不是断言某个库的错误文本。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppError {
+    /// 稳定错误码。
+    ///
+    /// 这个字段给 CLI、IPC 调用方和测试断言使用，
+    /// 要尽量保持稳定，不要直接暴露第三方库原始错误分类。
     pub code: String,
+    /// 面向人的错误说明。
+    ///
+    /// 它可以包含上下文细节，例如具体文件路径、系统错误文本或失败阶段，
+    /// 便于用户在日志和命令输出里直接理解问题。
     pub message: String,
 }
 
 impl AppError {
+    /// 直接构造项目内标准错误。
     pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             code: code.into(),
@@ -28,15 +38,21 @@ impl AppError {
         }
     }
 
+    /// 基于 IO 错误构造统一错误对象。
+    ///
+    /// `context` 负责描述“是在做什么时失败”，
+    /// 原始错误文本则作为补充细节拼进 `message`。
     pub fn io(context: &str, err: impl Display) -> Self {
         Self::new("io_error", format!("{context}: {err}"))
     }
 
+    /// 基于输入解析或格式校验错误构造统一错误对象。
     pub fn invalid(context: &str, err: impl Display) -> Self {
         Self::new("invalid_input", format!("{context}: {err}"))
     }
 
     #[allow(dead_code)]
+    /// 构造“不支持当前操作或环境”的统一错误。
     pub fn unsupported(message: impl Into<String>) -> Self {
         Self::new("unsupported", message.into())
     }
@@ -50,27 +66,44 @@ impl Display for AppError {
     }
 }
 
+/// 项目内部统一结果别名。
+///
+/// 让核心层、端口层和适配器层都围绕同一错误模型协作，
+/// 避免每层各自定义 `Result<T, XxxError>` 造成心智负担。
 pub type AppResult<T> = Result<T, AppError>;
 
 /// 电脑端和固件之间约定的模式字符串。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
+    /// 默认展示态；没有任何高优先级状态时用于演示灯效。
     Demo,
+    /// AI 正在思考、规划、分析。
     Thinking,
+    /// AI 正在读写文件、生成内容、处理上下文。
     Ai,
+    /// AI 正在执行命令、外部工具或其它“忙碌但非内容生成”的工作。
     Busy,
+    /// 当前轮次或会话成功结束。
     Success,
+    /// 当前轮次或会话进入失败态。
     Error,
+    /// 当前流程阻塞，等待用户输入、授权或确认。
     Alarm,
+    /// 固件的交通灯展示模式。
     Traffic,
+    /// 全部灯灭。
     Off,
+    /// 手动红灯常亮。
     Red,
+    /// 手动黄灯常亮。
     Yellow,
+    /// 手动绿灯常亮。
     Green,
 }
 
 impl Mode {
+    /// 返回与固件协议一致的稳定字符串值。
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Demo => "demo",
@@ -88,7 +121,9 @@ impl Mode {
         }
     }
 
-    /// 这里直接编码技术方案中的优先级表。
+    /// 返回该模式在全局路由中的优先级。
+    ///
+    /// 数字越大，表示当多个来源同时存在时，这个模式越应该成为最终展示态。
     pub fn priority(self) -> u8 {
         match self {
             Self::Alarm => 110,
@@ -106,7 +141,12 @@ impl Mode {
         }
     }
 
-    /// 默认 TTL 也必须稳定落在核心层，不能散在 adapter 中。
+    /// 返回该模式的默认存活时间。
+    ///
+    /// TTL 规则收敛在核心层，目的是：
+    /// 1. 不让不同 adapter 私自决定状态能保留多久；
+    /// 2. 让 router 对所有来源使用同一套过期规则；
+    /// 3. 让测试可以直接围绕模式语义断言过期行为。
     pub fn default_ttl(self) -> Option<Duration> {
         let secs = match self {
             Self::Alarm => 30 * 60,
@@ -130,6 +170,10 @@ impl Display for Mode {
 impl FromStr for Mode {
     type Err = AppError;
 
+    /// 将外部字符串解析为稳定的模式枚举。
+    ///
+    /// CLI、测试和未来潜在的 JSON 输入都复用这套解析规则，
+    /// 保证大小写、空白处理和错误码保持一致。
     fn from_str(s: &str) -> AppResult<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "demo" => Ok(Self::Demo),
@@ -156,20 +200,33 @@ impl FromStr for Mode {
 /// 新增 Agent 时只需要把原始 Hook 事件归一到这个枚举，不需要改 router/daemon。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum AgentCapability {
+    /// Agent 正在思考、规划、压缩上下文或组织后续动作。
     Thinking,
+    /// Agent 正在读取文件、编辑文件、生成文本或处理内容。
     Generating,
+    /// Agent 正在执行命令、调用外部工具或运行系统操作。
     RunningCommand,
+    /// Agent 暂停在需要用户介入的节点。
     WaitingForUser,
+    /// 当前动作或会话成功结束。
     Succeeded,
+    /// 当前动作或会话失败。
     Failed,
+    /// Agent 存在但当前不处于活跃处理态。
     Idle,
+    /// 当前来源无法被稳定识别时的兜底能力。
     Unknown,
 }
 
+/// 统一来源标识。
+///
+/// 这里单独包一层是为了把“任意字符串”与“已经归一后的来源名”区分开，
+/// 后续如果要扩展更多来源元信息，也可以在不破坏主流程的前提下演进。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentSource(pub String);
 
 impl AgentSource {
+    /// 以任意可转字符串值构造来源对象。
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
@@ -183,10 +240,22 @@ impl Display for AgentSource {
 
 #[derive(Debug, Clone)]
 pub struct HookParseContext {
+    /// 当前 `esp send` 指定的来源名。
+    ///
+    /// source adapter registry 会用它选择具体解析器。
     pub source: String,
+    /// 命令行显式传入的 mode。
+    ///
+    /// 对 Hook 场景来说它通常只是兜底值，最终模式还要经过 `resolve_mode`。
     pub explicit_mode: Mode,
+    /// 当前 CLI 进程工作目录。
+    ///
+    /// 它会参与 session fallback 生成，也会作为 `cwd` 的兜底来源。
     pub current_dir: PathBuf,
     #[allow(dead_code)]
+    /// 命令行显式传入的 TTL。
+    ///
+    /// 当前大多数 adapter 不直接使用它做模式判断，但保留在上下文里便于后续扩展。
     pub ttl: Option<Duration>,
 }
 
@@ -194,55 +263,98 @@ pub struct HookParseContext {
 /// 这里面只保留后续路由和排障需要的稳定字段。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentEvent {
+    /// 归一后的来源信息。
     pub source: AgentSource,
+    /// 当前事件所属会话标识。
     pub session: String,
+    /// 归一后的能力语义。
     pub capability: AgentCapability,
+    /// source adapter 给出的建议 mode。
+    ///
+    /// 如果是 `None`，说明该来源事件没有足够语义，需要后续走核心映射或命令兜底。
     pub suggested_mode: Option<Mode>,
+    /// 事件关联的工作目录。
     pub cwd: Option<PathBuf>,
+    /// 宿主工具原始 Hook 事件名。
     pub raw_event: Option<String>,
+    /// 宿主工具原始工具名。
     pub raw_tool: Option<String>,
+    /// 当前轮次 / 工具调用 / generation 的稳定标识。
     pub turn: Option<String>,
 }
 
+/// router 内部保存的“单个 source + session 当前状态”。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceState {
+    /// 来源工具名。
     pub source: String,
+    /// 会话标识。
     pub session: String,
+    /// 当前状态模式。
     pub mode: Mode,
+    /// 产生该状态的原始事件名。
     pub raw_event: Option<String>,
+    /// 产生该状态的原始工具名。
     pub raw_tool: Option<String>,
+    /// 产生该状态的轮次标识。
     pub turn: Option<String>,
+    /// 该状态对应的统一能力。
     pub capability: Option<AgentCapability>,
+    /// source adapter 曾建议的 mode。
     pub suggested_mode: Option<Mode>,
+    /// 该模式在全局路由中的优先级缓存值。
     pub priority: u8,
+    /// 最近一次写入这条状态的时间。
     pub updated_at: DateTime<Utc>,
+    /// 这条状态的过期时间；为空表示不过期。
     pub expires_at: Option<DateTime<Utc>>,
 }
 
+/// `status --verbose` 输出中的单条来源明细。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusSourceEntry {
+    /// 来源工具名。
     pub source: String,
+    /// 会话标识。
     pub session: String,
+    /// 当前保存的模式。
     pub mode: Mode,
+    /// 原始事件名。
     pub raw_event: Option<String>,
+    /// 原始工具名。
     pub raw_tool: Option<String>,
+    /// 原始 turn 标识。
     pub turn: Option<String>,
+    /// 统一能力语义。
     pub capability: Option<AgentCapability>,
+    /// source adapter 给出的建议模式。
     pub suggested_mode: Option<Mode>,
+    /// 该来源状态在全局路由中的优先级。
     pub priority: u8,
+    /// 距离过期还剩多少秒；为空表示不过期。
     pub expires_in: Option<i64>,
 }
 
+/// `esp status` 命令返回的标准状态快照。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusResponse {
+    /// daemon 运行状态，例如 `running` / `stopped`。
     pub daemon: String,
+    /// BLE 连接状态，例如 `connected` / `disconnected`。
     pub ble: String,
+    /// 当前连接设备名称。
     pub device: Option<String>,
+    /// 设备最近一次写入或缓存的模式。
     pub mode: Mode,
+    /// router 当前计算出的全局有效模式。
     pub effective: Mode,
+    /// verbose 模式下返回所有来源明细；普通模式可为空。
     pub sources: Option<Vec<StatusSourceEntry>>,
+    /// runtime 根目录路径，便于用户排障。
     pub runtime_dir: Option<String>,
+    /// 当前 IPC 传输类型，例如 `unix_socket` / `named_pipe`。
     pub ipc: Option<String>,
+    /// 最近一次成功写入 BLE 的时间。
     pub last_ble_write_at: Option<DateTime<Utc>>,
 }
 
@@ -292,23 +404,37 @@ pub struct LogEvent {
     pub kind: String,
     /// 面向人的简短描述。
     pub message: String,
+    /// 链路阶段，便于快速定位“当前走到哪一步”。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
     /// 稳定错误码，方便脚本或测试断言。
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
     /// 如果日志与某个 source 相关，则记录来源。
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     /// 如果日志与某个会话相关，则记录 session。
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
     /// 如果日志与某个最终 mode 相关，则记录 mode。
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub mode: Option<Mode>,
+    /// 结构化上下文，承载 hook、tool、turn、request_id、流程节点等关键排障信息。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<Value>,
 }
 
 /// daemon 启动后写入 runtime 目录的 IPC 元信息。
 /// 命令层通过它了解当前使用的传输类型和地址。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IpcInfo {
+    /// IPC 类型，例如 `unix_socket` / `named_pipe` / `tcp_loopback`。
     pub kind: String,
+    /// 当前 IPC 地址或路径。
     pub address: String,
+    /// IPC 协议版本。
     pub version: u8,
+    /// daemon 启动时间。
     pub started_at: DateTime<Utc>,
 }
 
@@ -340,7 +466,9 @@ pub struct HookSpec {
 /// Hook 配置的安装范围。
 #[derive(Debug, Clone)]
 pub enum InstallScope {
+    /// 安装到当前用户的全局配置目录。
     Global,
+    /// 安装到某个项目目录下的本地配置。
     Project(PathBuf),
 }
 
@@ -348,9 +476,13 @@ pub enum InstallScope {
 /// 用于用户查看实际落盘位置，也为后续排障预留依据。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstallManifest {
+    /// 安装目标名，例如 `codex` / `cursor` / `claude`。
     pub target: String,
+    /// 本次安装完成时间。
     pub installed_at: DateTime<Utc>,
+    /// 实际写入的配置文件路径。
     pub config_path: String,
+    /// Hook 命令最终引用的可执行路径。
     pub command_path: String,
 }
 
@@ -385,8 +517,11 @@ pub struct SendPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum IpcRequestPayload {
+    /// 发送一条状态更新请求。
     Send(SendPayload),
+    /// 查询 daemon 当前状态。
     Status { verbose: bool },
+    /// 请求 daemon 优雅停止。
     Stop,
 }
 
@@ -398,10 +533,12 @@ pub struct IpcRequestEnvelope {
     pub request_id: String,
     /// 预留鉴权字段，当前阶段未启用。
     pub auth: Option<String>,
+    /// 具体请求体。
     pub payload: IpcRequestPayload,
 }
 
 impl IpcRequestEnvelope {
+    /// 基于给定 payload 创建标准 IPC 请求 envelope。
     pub fn new(payload: IpcRequestPayload) -> Self {
         // 每次请求都生成全局唯一 request_id，
         // 这样客户端、daemon 和日志将来都能串联同一次请求。
@@ -414,19 +551,34 @@ impl IpcRequestEnvelope {
     }
 }
 
+/// IPC 响应 envelope。
+///
+/// 它与请求 envelope 成对出现，负责把 daemon 的处理结果包装成稳定协议，
+/// 供 CLI、测试和潜在外部调用方统一消费。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IpcResponseEnvelope {
+    /// IPC 协议版本。
     pub version: u8,
+    /// 与请求对应的 request_id。
     pub request_id: String,
+    /// 是否成功。
     pub ok: bool,
+    /// 面向人的简短响应信息。
     pub message: String,
+    /// 失败时返回的稳定错误码。
+    ///
+    /// 成功响应通常为空；失败响应应尽量提供可稳定断言的 code。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
+    /// 附加结构化响应数据。
+    ///
+    /// 例如 `status` 返回的完整状态快照，或 `send` 返回的 effective mode。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
 }
 
 impl IpcResponseEnvelope {
+    /// 构造一个成功响应。
     pub fn ok(request_id: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             version: 1,
@@ -438,6 +590,7 @@ impl IpcResponseEnvelope {
         }
     }
 
+    /// 为成功响应追加结构化数据。
     pub fn with_data(mut self, data: serde_json::Value) -> Self {
         // 为响应追加结构化数据。
         // 这里采用 builder 风格，避免创建多个近似构造函数。
@@ -445,6 +598,7 @@ impl IpcResponseEnvelope {
         self
     }
 
+    /// 基于统一错误对象构造失败响应。
     pub fn error(request_id: impl Into<String>, err: &AppError) -> Self {
         Self {
             version: 1,

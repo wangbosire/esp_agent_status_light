@@ -10,6 +10,7 @@ use crate::model::{AppResult, HookCommand, HookSpec, InstallScope, Mode};
 use crate::ports::hook_install::HookInstallAdapter;
 use crate::ports::platform::PlatformAdapter;
 
+/// Cursor Hook 安装器。
 pub struct CursorInstallAdapter;
 
 impl HookInstallAdapter for CursorInstallAdapter {
@@ -89,6 +90,7 @@ impl HookInstallAdapter for CursorInstallAdapter {
     }
 }
 
+/// 构造一条 Cursor Hook 规则定义。
 fn spec(exe: &Path, event: &str, matcher: Option<&str>, mode: Mode, ttl: u64) -> HookSpec {
     HookSpec {
         target: "cursor".into(),
@@ -116,6 +118,7 @@ fn spec(exe: &Path, event: &str, matcher: Option<&str>, mode: Mode, ttl: u64) ->
     }
 }
 
+/// 返回当前用户 home 目录。
 fn dirs_home() -> PathBuf {
     std::env::var("HOME")
         .map(PathBuf::from)

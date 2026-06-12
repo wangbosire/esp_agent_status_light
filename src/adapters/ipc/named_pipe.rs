@@ -31,6 +31,7 @@ pub struct NamedPipeTransport {
 
 impl NamedPipeTransport {
     #[cfg_attr(not(windows), allow(dead_code))]
+    /// 使用逻辑 IPC 路径创建 named pipe 客户端。
     pub fn new(path: PathBuf) -> Self {
         Self { path }
     }
@@ -89,11 +90,13 @@ impl IpcTransport for NamedPipeTransport {
 }
 
 pub struct NamedPipeServer {
+    /// 命令层约定的逻辑 IPC 路径，会被映射为稳定管道名。
     path: PathBuf,
 }
 
 impl NamedPipeServer {
     #[cfg_attr(not(windows), allow(dead_code))]
+    /// 使用逻辑 IPC 路径创建 named pipe 服务端。
     pub fn new(path: PathBuf) -> Self {
         Self { path }
     }
@@ -156,6 +159,7 @@ impl IpcServer for NamedPipeServer {
     }
 }
 
+/// 将逻辑 IPC 路径稳定映射为 Windows named pipe 名称。
 fn pipe_name_from_path(path: &Path) -> String {
     let raw = path.to_string_lossy();
     if raw.starts_with(r"\\.\pipe\") {
@@ -179,6 +183,7 @@ fn pipe_name_from_path(path: &Path) -> String {
     format!(r"\\.\pipe\esp-agent-status-light-{readable}-{hash:016x}")
 }
 
+/// 清洗 pipe 名称中的可读部分，只保留安全字符。
 fn sanitize_pipe_component(value: &str) -> String {
     // pipe 名称只保留安全字符，其余统一替换成 `-`，避免宿主路径包含特殊字符。
     value
@@ -216,6 +221,9 @@ async fn open_client_with_retry(
 }
 
 #[cfg(windows)]
+/// 创建一个 named pipe server instance。
+///
+/// Windows 要求服务端持续准备好新的空闲实例，客户端才能稳定连接。
 fn create_server_instance(
     pipe_name: &str,
     first_instance: bool,
@@ -229,6 +237,7 @@ fn create_server_instance(
 }
 
 #[cfg(windows)]
+/// 处理单个 named pipe 连接上的一条请求。
 async fn handle_pipe_stream(
     mut stream: TokioNamedPipeServer,
     handler: Arc<dyn IpcRequestHandler>,

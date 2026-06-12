@@ -10,6 +10,7 @@ use crate::model::{AppResult, HookCommand, HookSpec, InstallScope, Mode};
 use crate::ports::hook_install::HookInstallAdapter;
 use crate::ports::platform::PlatformAdapter;
 
+/// Claude Hook 安装器。
 pub struct ClaudeInstallAdapter;
 
 impl HookInstallAdapter for ClaudeInstallAdapter {
@@ -102,6 +103,7 @@ impl HookInstallAdapter for ClaudeInstallAdapter {
     }
 }
 
+/// 构造一条 Claude Hook 规则定义。
 fn spec(exe: &Path, event: &str, matcher: Option<&str>, mode: Mode, ttl: u64) -> HookSpec {
     HookSpec {
         target: "claude".into(),
@@ -129,6 +131,7 @@ fn spec(exe: &Path, event: &str, matcher: Option<&str>, mode: Mode, ttl: u64) ->
     }
 }
 
+/// 返回当前用户 home 目录。
 fn dirs_home() -> PathBuf {
     std::env::var("HOME")
         .map(PathBuf::from)

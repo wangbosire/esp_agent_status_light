@@ -4,6 +4,7 @@
 //! 确保开发态与 release 安装态继续保持既定差异。
 
 use super::*;
+use std::path::Path;
 
 #[test]
 fn debug_target_binary_uses_cargo_run_hooks() {

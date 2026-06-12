@@ -14,7 +14,9 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
-use crate::model::{AgentCapability, AgentEvent, AgentSource, HookParseContext, Mode};
+use crate::model::{
+    AgentCapability, AgentEvent, AgentSource, EventSemantics, HookParseContext, Mode,
+};
 use crate::ports::source::SourceAdapterRegistry;
 
 /// 构建默认来源解析器注册表。
@@ -136,6 +138,7 @@ pub fn build_event(
     input: &Value,
     capability: AgentCapability,
     suggested_mode: Option<Mode>,
+    semantics: EventSemantics,
 ) -> AgentEvent {
     // 所有来源最终都收敛到统一 `AgentEvent`，
     // 这正是 Adapter 模式在这里的核心价值。
@@ -148,5 +151,6 @@ pub fn build_event(
         raw_event: extract_raw_event(input),
         raw_tool: extract_raw_tool(input),
         turn: extract_turn(input),
+        semantics,
     }
 }

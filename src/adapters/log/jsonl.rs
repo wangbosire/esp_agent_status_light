@@ -8,6 +8,7 @@ use std::sync::Arc;
 use crate::model::{AppError, AppResult, LogEvent};
 use crate::ports::log::EventLog;
 use crate::ports::runtime::RuntimeStore;
+use crate::runtime_lock::FileLock;
 
 /// 运行日志只保留最近 3000 条，避免长期运行后单文件无限膨胀。
 const MAX_RUNTIME_LOG_ENTRIES: usize = 3000;
@@ -28,28 +29,18 @@ impl JsonlLogAdapter {
 impl EventLog for JsonlLogAdapter {
     fn append(&self, event: LogEvent) -> AppResult<()> {
         self.runtime.ensure_layout()?;
-        // 采用 JSONL 追加写入：简单、稳定，而且适合按行 tail。
-        let line = serde_json::to_string(&event)
-            .map_err(|err| AppError::invalid("serialize log event", err))?;
-        append_jsonl_line(&self.runtime.events_log_path(), &line, "events")?;
-        append_jsonl_line(&self.runtime.runtime_log_path(), &line, "runtime")?;
-        trim_jsonl_to_last_n(
+        let _guard = LogWriteGuard::acquire(&self.runtime.runtime_log_path())?;
+        self.append_event_and_runtime_locked(
+            &self.runtime.events_log_path(),
             &self.runtime.runtime_log_path(),
-            MAX_RUNTIME_LOG_ENTRIES,
-            "runtime",
+            event,
         )
     }
 
     fn append_runtime(&self, event: LogEvent) -> AppResult<()> {
         self.runtime.ensure_layout()?;
-        let line = serde_json::to_string(&event)
-            .map_err(|err| AppError::invalid("serialize runtime log event", err))?;
-        append_jsonl_line(&self.runtime.runtime_log_path(), &line, "runtime")?;
-        trim_jsonl_to_last_n(
-            &self.runtime.runtime_log_path(),
-            MAX_RUNTIME_LOG_ENTRIES,
-            "runtime",
-        )
+        let _guard = LogWriteGuard::acquire(&self.runtime.runtime_log_path())?;
+        self.append_runtime_locked(&self.runtime.runtime_log_path(), event)
     }
 
     fn tail(&self, limit: usize) -> AppResult<Vec<LogEvent>> {
@@ -72,6 +63,29 @@ impl EventLog for JsonlLogAdapter {
     }
 }
 
+impl JsonlLogAdapter {
+    fn append_event_and_runtime_locked(
+        &self,
+        events_path: &Path,
+        runtime_path: &Path,
+        event: LogEvent,
+    ) -> AppResult<()> {
+        // 采用 JSONL 追加写入：简单、稳定，而且适合按行 tail。
+        let line = serde_json::to_string(&event)
+            .map_err(|err| AppError::invalid("serialize log event", err))?;
+        append_jsonl_line(events_path, &line, "events")?;
+        append_jsonl_line(runtime_path, &line, "runtime")?;
+        maybe_trim_jsonl_to_last_n(runtime_path, MAX_RUNTIME_LOG_ENTRIES, "runtime")
+    }
+
+    fn append_runtime_locked(&self, runtime_path: &Path, event: LogEvent) -> AppResult<()> {
+        let line = serde_json::to_string(&event)
+            .map_err(|err| AppError::invalid("serialize runtime log event", err))?;
+        append_jsonl_line(runtime_path, &line, "runtime")?;
+        maybe_trim_jsonl_to_last_n(runtime_path, MAX_RUNTIME_LOG_ENTRIES, "runtime")
+    }
+}
+
 /// 追加一行 JSONL 到指定日志文件。
 fn append_jsonl_line(path: &Path, line: &str, label: &str) -> AppResult<()> {
     let mut file = OpenOptions::new()
@@ -85,7 +99,7 @@ fn append_jsonl_line(path: &Path, line: &str, label: &str) -> AppResult<()> {
 /// 将 JSONL 日志裁剪到最近 N 条。
 ///
 /// runtime 日志更偏排障用途，因此允许按条数截断来控制文件体积。
-fn trim_jsonl_to_last_n(path: &Path, max_entries: usize, label: &str) -> AppResult<()> {
+fn maybe_trim_jsonl_to_last_n(path: &Path, max_entries: usize, label: &str) -> AppResult<()> {
     let raw =
         fs::read_to_string(path).map_err(|err| AppError::io(&format!("read {label} log"), err))?;
     let lines: Vec<&str> = raw.lines().collect();
@@ -96,7 +110,22 @@ fn trim_jsonl_to_last_n(path: &Path, max_entries: usize, label: &str) -> AppResu
     let start = lines.len().saturating_sub(max_entries);
     let mut trimmed = lines[start..].join("\n");
     trimmed.push('\n');
-    fs::write(path, trimmed).map_err(|err| AppError::io(&format!("trim {label} log"), err))
+    let tmp_path = path.with_extension(format!("{}.tmp", label));
+    fs::write(&tmp_path, trimmed).map_err(|err| AppError::io(&format!("trim {label} log"), err))?;
+    fs::rename(&tmp_path, path).map_err(|err| AppError::io(&format!("replace {label} log"), err))
+}
+
+struct LogWriteGuard {
+    _lock: FileLock,
+}
+
+impl LogWriteGuard {
+    fn acquire(runtime_log_path: &Path) -> AppResult<Self> {
+        let lock_path = runtime_log_path.with_extension("lock");
+        Ok(Self {
+            _lock: FileLock::acquire(lock_path)?,
+        })
+    }
 }
 
 // 测试实现拆到独立目录，避免与 JSONL 日志写入主逻辑混写在同一个文件里。

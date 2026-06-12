@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 
 use crate::model::{
-    AgentCapability, AgentEvent, HookParseContext, Mode, SendPayload, SourceState,
+    AgentCapability, AgentEvent, EventSemantics, HookParseContext, Mode, SendPayload, SourceState,
     StatusSourceEntry,
 };
 
@@ -90,6 +90,7 @@ impl StateRouter {
             priority: payload.mode.priority(),
             updated_at: now,
             expires_at: ttl.map(|ttl| now + ttl),
+            semantics: payload.semantics,
         };
 
         match self.states.get(&key) {
@@ -154,6 +155,7 @@ impl StateRouter {
                 turn: state.turn.clone(),
                 capability: state.capability.clone(),
                 suggested_mode: state.suggested_mode,
+                semantics: state.semantics,
                 priority: state.priority,
                 expires_in: state
                     .expires_at
@@ -168,6 +170,22 @@ impl StateRouter {
                 .then_with(|| right.expires_in.cmp(&left.expires_in))
         });
         items
+    }
+
+    /// 在单次可变借用中完成过期清理，并返回一个自洽的状态快照。
+    pub fn snapshot_status(
+        &mut self,
+        now: DateTime<Utc>,
+        verbose: bool,
+    ) -> (Mode, Option<Vec<StatusSourceEntry>>) {
+        self.prune_expired(now);
+        let effective = self.effective_mode(now);
+        let sources = if verbose {
+            Some(self.snapshot(now))
+        } else {
+            None
+        };
+        (effective, sources)
     }
 
     /// 判断同一个 `(source, session)` 的新状态是否应覆盖旧状态。
@@ -224,19 +242,9 @@ fn should_preserve_ai_generation_state(current: &SourceState, candidate: &Source
         return false;
     }
 
-    // 只有“没有明确工具语义的泛 continuation busy”才不应冲掉 ai。
-    // 明确的 shell/工具执行仍应展示为 busy。
-    if matches!(
-        candidate.raw_tool.as_deref(),
-        Some("Bash" | "Shell" | "Read" | "MCP" | "MultiEdit" | "Edit" | "Write" | "apply_patch")
-    ) {
-        return false;
-    }
-
-    matches!(
-        candidate.raw_event.as_deref(),
-        Some("PostToolBatch" | "afterAgentThought")
-    )
+    // 只有“没有明确工具边界的 continuation”才不应冲掉 ai。
+    candidate.capability == Some(AgentCapability::RunningCommand)
+        && candidate.semantics == EventSemantics::Continuation
 }
 
 // 测试实现拆到独立目录，避免与状态路由主逻辑混写在同一个文件里。

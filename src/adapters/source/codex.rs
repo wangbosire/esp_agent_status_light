@@ -4,7 +4,9 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::adapters::source::build_event;
-use crate::model::{AgentCapability, AgentEvent, AppError, AppResult, HookParseContext, Mode};
+use crate::model::{
+    AgentCapability, AgentEvent, AppError, AppResult, EventSemantics, HookParseContext, Mode,
+};
 use crate::ports::source::SourceAdapter;
 
 #[allow(dead_code)]
@@ -46,7 +48,13 @@ impl SourceAdapter for CodexAdapter {
             ctx.explicit_mode,
         );
 
-        Ok(build_event(ctx, &input, capability, suggested_mode))
+        Ok(build_event(
+            ctx,
+            &input,
+            capability,
+            suggested_mode,
+            semantics_for_codex(raw.hook_event_name.as_deref(), raw.tool_name.as_deref()),
+        ))
     }
 }
 
@@ -81,6 +89,24 @@ fn map_codex_mode(
             _ => (AgentCapability::RunningCommand, Some(Mode::Busy)),
         },
         _ => (AgentCapability::Unknown, None),
+    }
+}
+
+fn semantics_for_codex(raw_event: Option<&str>, tool_name: Option<&str>) -> EventSemantics {
+    match raw_event.unwrap_or_default() {
+        "SessionStart" | "SubagentStop" | "Stop" => EventSemantics::Completion,
+        "UserPromptSubmit" | "PreCompact" | "PostCompact" | "SubagentStart" => {
+            EventSemantics::Continuation
+        }
+        "PermissionRequest" => EventSemantics::UserAttention,
+        "PostToolUse" => EventSemantics::Continuation,
+        "PreToolUse" => match tool_name.unwrap_or_default() {
+            "Bash" => EventSemantics::ExplicitToolExecution,
+            "Read" => EventSemantics::FileRead,
+            "apply_patch" | "Edit" | "Write" => EventSemantics::FileWrite,
+            _ => EventSemantics::ExplicitToolExecution,
+        },
+        _ => EventSemantics::Unknown,
     }
 }
 

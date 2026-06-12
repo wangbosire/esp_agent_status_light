@@ -6,7 +6,7 @@
 use chrono::Utc;
 
 use super::*;
-use crate::model::{AgentEvent, AgentSource};
+use crate::model::{AgentEvent, AgentSource, EventSemantics};
 
 #[test]
 fn resolve_mode_prefers_suggested_mode() {
@@ -25,6 +25,7 @@ fn resolve_mode_prefers_suggested_mode() {
         raw_event: None,
         raw_tool: None,
         turn: None,
+        semantics: EventSemantics::Unknown,
     };
     assert_eq!(resolve_mode(&ctx, &event), Mode::Alarm);
 }
@@ -46,6 +47,7 @@ fn manual_off_clears_all_states() {
             suggested_mode: None,
             cwd: None,
             turn: None,
+            semantics: EventSemantics::Unknown,
         },
         now,
     );
@@ -64,6 +66,7 @@ fn manual_off_clears_all_states() {
             suggested_mode: None,
             cwd: None,
             turn: None,
+            semantics: EventSemantics::Unknown,
         },
         now,
     );
@@ -87,6 +90,7 @@ fn latest_state_overrides_error_in_same_turn() {
         suggested_mode: Some(Mode::Error),
         cwd: None,
         turn: Some("turn-1".into()),
+        semantics: EventSemantics::Failure,
     };
     router.apply_send(&error, now);
 
@@ -102,6 +106,7 @@ fn latest_state_overrides_error_in_same_turn() {
         suggested_mode: Some(Mode::Success),
         cwd: None,
         turn: Some("turn-1".into()),
+        semantics: EventSemantics::Completion,
     };
     assert_eq!(router.apply_send(&success, now), Mode::Success);
     assert_eq!(router.effective_mode(now), Mode::Success);
@@ -123,6 +128,7 @@ fn latest_state_overrides_alarm_in_same_session() {
         suggested_mode: Some(Mode::Alarm),
         cwd: None,
         turn: None,
+        semantics: EventSemantics::UserAttention,
     };
     router.apply_send(&alarm, now);
 
@@ -138,6 +144,7 @@ fn latest_state_overrides_alarm_in_same_session() {
         suggested_mode: Some(Mode::Success),
         cwd: None,
         turn: None,
+        semantics: EventSemantics::Completion,
     };
     let later = now + ChronoDuration::seconds(1);
     assert_eq!(router.apply_send(&success, later), Mode::Success);
@@ -161,6 +168,7 @@ fn latest_state_replaces_same_session_even_when_priority_is_lower() {
         suggested_mode: Some(Mode::Thinking),
         cwd: None,
         turn: None,
+        semantics: EventSemantics::Continuation,
     };
     assert_eq!(router.apply_send(&thinking, now), Mode::Thinking);
 
@@ -176,6 +184,7 @@ fn latest_state_replaces_same_session_even_when_priority_is_lower() {
         suggested_mode: Some(Mode::Success),
         cwd: None,
         turn: None,
+        semantics: EventSemantics::Completion,
     };
     let later = now + ChronoDuration::seconds(1);
     assert_eq!(router.apply_send(&success, later), Mode::Success);
@@ -203,6 +212,7 @@ fn generic_busy_continuation_does_not_override_ai_in_same_session() {
         suggested_mode: Some(Mode::Ai),
         cwd: None,
         turn: Some("turn-1".into()),
+        semantics: EventSemantics::FileWrite,
     };
     assert_eq!(router.apply_send(&ai, now), Mode::Ai);
 
@@ -218,6 +228,7 @@ fn generic_busy_continuation_does_not_override_ai_in_same_session() {
         suggested_mode: Some(Mode::Busy),
         cwd: None,
         turn: None,
+        semantics: EventSemantics::Continuation,
     };
     let later = now + ChronoDuration::seconds(1);
     assert_eq!(router.apply_send(&generic_busy, later), Mode::Ai);
@@ -245,6 +256,7 @@ fn explicit_shell_busy_still_overrides_ai_in_same_session() {
         suggested_mode: Some(Mode::Ai),
         cwd: None,
         turn: Some("turn-1".into()),
+        semantics: EventSemantics::FileWrite,
     };
     assert_eq!(router.apply_send(&ai, now), Mode::Ai);
 
@@ -260,6 +272,7 @@ fn explicit_shell_busy_still_overrides_ai_in_same_session() {
         suggested_mode: Some(Mode::Busy),
         cwd: None,
         turn: Some("turn-2".into()),
+        semantics: EventSemantics::ExplicitToolExecution,
     };
     let later = now + ChronoDuration::seconds(1);
     assert_eq!(router.apply_send(&shell_busy, later), Mode::Busy);

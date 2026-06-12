@@ -3,9 +3,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use serde_json::{Value, json};
+use serde_json::Value;
 
-use crate::adapters::install::{cursor_uninstall, decorate_command_fields};
+use crate::adapters::install::{cursor_uninstall, install_cursor_like_hooks};
 use crate::adapters::platform::user_home_dir;
 use crate::model::{AppResult, HookCommand, HookSpec, InstallScope, Mode};
 use crate::ports::hook_install::HookInstallAdapter;
@@ -61,29 +61,7 @@ impl HookInstallAdapter for CursorInstallAdapter {
         hook_id: &str,
         platform: &dyn PlatformAdapter,
     ) -> AppResult<Value> {
-        // 先清理旧条目，避免重复安装后同一事件触发多次。
-        let mut config = cursor_uninstall(config, hook_id);
-        let root = config
-            .as_object_mut()
-            .expect("cursor config should be object");
-        root.entry("version").or_insert_with(|| json!(1));
-        let hooks = root.entry("hooks").or_insert_with(|| json!({}));
-        let hooks_map = hooks.as_object_mut().expect("hooks should be object");
-
-        for spec in specs {
-            let entry = hooks_map
-                .entry(spec.event.clone())
-                .or_insert_with(|| json!([]));
-            let items = entry.as_array_mut().expect("hook event should be array");
-            let mut item = json!({});
-            decorate_command_fields(platform, &mut item, &spec.command);
-            if let Some(matcher) = &spec.matcher {
-                item["matcher"] = json!(matcher);
-            }
-            items.push(item);
-        }
-
-        Ok(config)
+        install_cursor_like_hooks(config, specs, hook_id, platform)
     }
 
     fn uninstall(&self, config: Value, hook_id: &str) -> AppResult<Value> {

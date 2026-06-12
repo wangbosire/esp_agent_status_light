@@ -3,9 +3,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use serde_json::{Value, json};
+use serde_json::Value;
 
-use crate::adapters::install::{codex_like_uninstall, decorate_command_fields};
+use crate::adapters::install::{codex_like_uninstall, install_codex_like_hooks};
 use crate::adapters::platform::user_home_dir;
 use crate::model::{AppResult, HookCommand, HookSpec, InstallScope, Mode};
 use crate::ports::hook_install::HookInstallAdapter;
@@ -70,33 +70,7 @@ impl HookInstallAdapter for ClaudeInstallAdapter {
         hook_id: &str,
         platform: &dyn PlatformAdapter,
     ) -> AppResult<Value> {
-        // Claude 的 hooks 结构与 Codex 相近，因此复用相同的 uninstall 策略。
-        let mut config = codex_like_uninstall(config, hook_id);
-        let root = config
-            .as_object_mut()
-            .expect("claude config should be object");
-        let hooks = root.entry("hooks").or_insert_with(|| json!({}));
-        let hooks_map = hooks.as_object_mut().expect("hooks should be object");
-
-        for spec in specs {
-            let entry = hooks_map
-                .entry(spec.event.clone())
-                .or_insert_with(|| json!([]));
-            let items = entry.as_array_mut().expect("event hooks should be array");
-            let mut group = json!({
-                "hooks": [{
-                    "type": "command",
-                    "timeout": 10
-                }]
-            });
-            decorate_command_fields(platform, &mut group["hooks"][0], &spec.command);
-            if let Some(matcher) = &spec.matcher {
-                group["matcher"] = json!(matcher);
-            }
-            items.push(group);
-        }
-
-        Ok(config)
+        install_codex_like_hooks(config, specs, hook_id, platform, Some(10), None)
     }
 
     fn uninstall(&self, config: Value, hook_id: &str) -> AppResult<Value> {

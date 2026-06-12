@@ -33,10 +33,8 @@ impl Default for BtleplugBleAdapter {
         Self {
             // UUID 必须与固件中的 GATT 服务保持严格一致。
             device_name: "AgentStatusLight".into(),
-            service_uuid: Uuid::parse_str("b8b7e001-7a6b-4f4f-9a8b-11c0ffee0001")
-                .expect("service uuid should be valid"),
-            mode_char_uuid: Uuid::parse_str("b8b7e002-7a6b-4f4f-9a8b-11c0ffee0001")
-                .expect("char uuid should be valid"),
+            service_uuid: Uuid::from_u128(0xb8b7e0017a6b4f4f9a8b11c0ffee0001),
+            mode_char_uuid: Uuid::from_u128(0xb8b7e0027a6b4f4f9a8b11c0ffee0001),
             peripheral: None,
             characteristic: None,
             health: DeviceHealth::default(),

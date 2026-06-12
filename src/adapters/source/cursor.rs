@@ -4,7 +4,9 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::adapters::source::build_event;
-use crate::model::{AgentCapability, AgentEvent, AppError, AppResult, HookParseContext, Mode};
+use crate::model::{
+    AgentCapability, AgentEvent, AppError, AppResult, EventSemantics, HookParseContext, Mode,
+};
 use crate::ports::source::SourceAdapter;
 
 #[allow(dead_code)]
@@ -52,7 +54,18 @@ impl SourceAdapter for CursorAdapter {
             raw.reason.as_deref(),
         );
 
-        Ok(build_event(ctx, &input, capability, suggested_mode))
+        Ok(build_event(
+            ctx,
+            &input,
+            capability,
+            suggested_mode,
+            semantics_for_cursor(
+                raw.hook_event_name.as_deref(),
+                raw.tool_name.as_deref(),
+                raw.status.as_deref(),
+                raw.reason.as_deref(),
+            ),
+        ))
     }
 }
 
@@ -102,6 +115,42 @@ fn map_cursor_mode(
         }
         "workspaceOpen" => (AgentCapability::Idle, Some(Mode::Demo)),
         _ => (AgentCapability::Unknown, None),
+    }
+}
+
+fn semantics_for_cursor(
+    raw_event: Option<&str>,
+    tool_name: Option<&str>,
+    status: Option<&str>,
+    reason: Option<&str>,
+) -> EventSemantics {
+    match raw_event.unwrap_or_default() {
+        "sessionStart" | "workspaceOpen" => EventSemantics::Continuation,
+        "beforeSubmitPrompt" | "afterAgentThought" | "subagentStart" | "preCompact" => {
+            EventSemantics::Continuation
+        }
+        "afterAgentResponse" | "afterFileEdit" | "afterTabFileEdit" => EventSemantics::FileWrite,
+        "postToolUseFailure" => EventSemantics::Failure,
+        "beforeReadFile" | "beforeTabFileRead" => EventSemantics::FileRead,
+        "beforeShellExecution" | "beforeMCPExecution" => EventSemantics::ExplicitToolExecution,
+        "afterShellExecution" | "afterMCPExecution" => EventSemantics::Completion,
+        "preToolUse" => match tool_name.unwrap_or_default() {
+            "Write" | "Edit" | "MultiEdit" => EventSemantics::FileWrite,
+            "Shell" => EventSemantics::ExplicitToolExecution,
+            _ => EventSemantics::ExplicitToolExecution,
+        },
+        "subagentStop" | "stop" => {
+            if matches!(status, Some("error" | "aborted")) {
+                EventSemantics::Failure
+            } else {
+                EventSemantics::Completion
+            }
+        }
+        "sessionEnd" => {
+            let _ = reason;
+            EventSemantics::Completion
+        }
+        _ => EventSemantics::Unknown,
     }
 }
 

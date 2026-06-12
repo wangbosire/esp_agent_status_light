@@ -6,7 +6,7 @@
 use serde_json::Value;
 
 use crate::adapters::source::build_event;
-use crate::model::{AgentCapability, AgentEvent, AppResult, HookParseContext};
+use crate::model::{AgentCapability, AgentEvent, AppResult, EventSemantics, HookParseContext};
 use crate::ports::source::SourceAdapter;
 
 pub struct FallbackAdapter;
@@ -14,7 +14,13 @@ pub struct FallbackAdapter;
 impl FallbackAdapter {
     pub fn parse_lossy(&self, input: Value, ctx: &HookParseContext) -> AgentEvent {
         // 兜底解析永远不假设具体语义，只保留最保守的 Unknown 能力。
-        build_event(ctx, &input, AgentCapability::Unknown, None)
+        build_event(
+            ctx,
+            &input,
+            AgentCapability::Unknown,
+            None,
+            EventSemantics::Unknown,
+        )
     }
 }
 

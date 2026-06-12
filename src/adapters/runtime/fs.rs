@@ -4,7 +4,7 @@
 //! 这是最简单、最稳妥、也最便于用户手动排查的一种实现。
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::model::{AppError, AppResult, InstallManifest, IpcInfo};
 use crate::ports::runtime::RuntimeStore;
@@ -31,6 +31,19 @@ impl FsRuntimeAdapter {
     fn ipc_info_path(&self) -> PathBuf {
         // 保存当前 IPC 类型和地址，便于 status 输出和命令侧诊断。
         self.runtime_dir().join("ipc.json")
+    }
+
+    fn write_atomic(&self, path: PathBuf, raw: String, context: &str) -> AppResult<()> {
+        let tmp_path = path.with_extension(format!(
+            "{}.tmp.{}",
+            path.extension()
+                .and_then(|ext| ext.to_str())
+                .unwrap_or("tmp"),
+            std::process::id()
+        ));
+        fs::write(&tmp_path, raw)
+            .map_err(|err| AppError::io(&format!("write {context} temp"), err))?;
+        replace_file(&tmp_path, &path, context)
     }
 }
 
@@ -84,8 +97,7 @@ impl RuntimeStore for FsRuntimeAdapter {
     }
 
     fn write_pid(&self, pid: u32) -> AppResult<()> {
-        fs::write(self.pid_path(), pid.to_string())
-            .map_err(|err| AppError::io("write pid file", err))
+        self.write_atomic(self.pid_path(), pid.to_string(), "pid file")
     }
 
     fn clear_pid(&self) -> AppResult<()> {
@@ -110,7 +122,7 @@ impl RuntimeStore for FsRuntimeAdapter {
     fn write_ipc_info(&self, info: &IpcInfo) -> AppResult<()> {
         let raw = serde_json::to_string_pretty(info)
             .map_err(|err| AppError::invalid("serialize ipc info", err))?;
-        fs::write(self.ipc_info_path(), raw).map_err(|err| AppError::io("write ipc info", err))
+        self.write_atomic(self.ipc_info_path(), raw, "ipc info")
     }
 
     fn clear_ipc_info(&self) -> AppResult<()> {
@@ -125,7 +137,24 @@ impl RuntimeStore for FsRuntimeAdapter {
         // install manifest 只记录“这次安装把什么写到了哪里”，不作为运行时真相来源。
         let raw = serde_json::to_string_pretty(manifest)
             .map_err(|err| AppError::invalid("serialize install manifest", err))?;
-        fs::write(self.install_manifest_path(&manifest.target), raw)
-            .map_err(|err| AppError::io("write install manifest", err))
+        self.write_atomic(
+            self.install_manifest_path(&manifest.target),
+            raw,
+            "install manifest",
+        )
+    }
+}
+
+fn replace_file(from: &Path, to: &Path, context: &str) -> AppResult<()> {
+    match fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        Err(rename_err) => {
+            if to.exists() {
+                fs::remove_file(to).map_err(|err| AppError::io(context, err))?;
+                fs::rename(from, to).map_err(|err| AppError::io(context, err))
+            } else {
+                Err(AppError::io(context, rename_err))
+            }
+        }
     }
 }

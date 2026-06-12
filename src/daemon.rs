@@ -19,6 +19,7 @@ use crate::ports::ipc::{IpcRequestHandler, IpcServer};
 use crate::ports::log::EventLog;
 use crate::ports::runtime::RuntimeStore;
 use crate::router::StateRouter;
+use crate::runtime_lock::FileLock;
 
 /// daemon 是唯一持有 LightDevice 的进程。
 /// 所有 Hook 事件都要先经过 IPC 进入这里，再由这里统一做优先级路由和 BLE 写入。
@@ -37,6 +38,8 @@ pub struct Daemon {
     last_ble_write_at: Mutex<Option<chrono::DateTime<chrono::Utc>>>,
     /// 最近一次真正写到设备上的模式，用于去重和重连补写。
     last_applied_mode: Mutex<Option<Mode>>,
+    /// 进程级启动锁，避免并发 spawn 出多个 daemon。
+    startup_lock: Mutex<Option<FileLock>>,
 }
 
 impl Daemon {
@@ -60,6 +63,7 @@ impl Daemon {
             shutdown_tx,
             last_ble_write_at: Mutex::new(None),
             last_applied_mode: Mutex::new(None),
+            startup_lock: Mutex::new(None),
         })
     }
 
@@ -79,6 +83,7 @@ impl Daemon {
     pub async fn run(self: Arc<Self>, server: Arc<dyn IpcServer>) -> AppResult<()> {
         // daemon 启动时先写入运行时元信息，便于命令层自动发现与自恢复。
         self.runtime.ensure_layout()?;
+        self.acquire_startup_lock()?;
         self.runtime.write_pid(std::process::id())?;
         self.runtime.write_ipc_info(&server.info())?;
         self.append_log("daemon", "daemon started", None, None, None, None)?;
@@ -122,6 +127,7 @@ impl Daemon {
 
         let _ = self.runtime.clear_pid();
         let _ = self.runtime.clear_ipc_info();
+        let _ = self.release_startup_lock();
         let _ = self.append_log("daemon", "daemon stopped", None, None, None, None);
 
         serve_result
@@ -142,17 +148,12 @@ impl Daemon {
                 }
                 _ = sleep(Duration::from_secs(1)) => {
                     let now = Utc::now();
-                    let before = {
-                        let router = self.router.lock().await;
-                        router.effective_mode(now)
-                    };
-                    {
+                    let (before, after) = {
                         let mut router = self.router.lock().await;
+                        let before = router.effective_mode(now);
                         router.prune_expired(now);
-                    }
-                    let after = {
-                        let router = self.router.lock().await;
-                        router.effective_mode(now)
+                        let after = router.effective_mode(now);
+                        (before, after)
                     };
                     if before != after {
                         // 这里只是普通过期切换，不是重连场景；
@@ -489,19 +490,9 @@ impl Daemon {
     /// 便于排查“为什么现在显示的是这个状态”。
     async fn handle_status(&self, request_id: &str, verbose: bool) -> IpcResponseEnvelope {
         let now = Utc::now();
-        let sources = {
+        let (effective, sources) = {
             let mut router = self.router.lock().await;
-            router.prune_expired(now);
-            // verbose 模式才返回每个来源明细，避免普通 `status` 输出过大。
-            if verbose {
-                Some(router.snapshot(now))
-            } else {
-                None
-            }
-        };
-        let effective = {
-            let router = self.router.lock().await;
-            router.effective_mode(now)
+            router.snapshot_status(now, verbose)
         };
         let health: DeviceHealth = {
             let device = self.device.lock().await;
@@ -547,6 +538,20 @@ impl Daemon {
         let _ = self.append_log("daemon", "stop requested", None, None, None, None);
         let _ = self.shutdown_tx.send(true);
         IpcResponseEnvelope::ok(request_id.to_string(), "stopping")
+    }
+
+    fn acquire_startup_lock(&self) -> AppResult<()> {
+        let lock_path = self.runtime.runtime_dir().join("daemon.lock");
+        let lock = FileLock::acquire(lock_path)?;
+        let mut guard = self.startup_lock.blocking_lock();
+        *guard = Some(lock);
+        Ok(())
+    }
+
+    fn release_startup_lock(&self) -> AppResult<()> {
+        let mut guard = self.startup_lock.blocking_lock();
+        let _ = guard.take();
+        Ok(())
     }
 }
 

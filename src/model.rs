@@ -281,6 +281,31 @@ pub struct AgentEvent {
     pub raw_tool: Option<String>,
     /// 当前轮次 / 工具调用 / generation 的稳定标识。
     pub turn: Option<String>,
+    /// 由 source adapter 提炼出的稳定语义，供核心路由层决策。
+    pub semantics: EventSemantics,
+}
+
+/// 从宿主 Hook 事件中提炼出的稳定语义。
+///
+/// router 只关心这类语义，不应再直接依赖宿主私有字符串。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum EventSemantics {
+    /// 泛 continuation 事件，没有明确工具边界。
+    Continuation,
+    /// 明确的 shell / tool 执行事件。
+    ExplicitToolExecution,
+    /// 明确的文件读取事件。
+    FileRead,
+    /// 明确的文件编辑 / 写入事件。
+    FileWrite,
+    /// 结束或成功收尾事件。
+    Completion,
+    /// 失败事件。
+    Failure,
+    /// 需要用户介入的事件。
+    UserAttention,
+    /// 无法稳定归类的兜底语义。
+    Unknown,
 }
 
 /// router 内部保存的“单个 source + session 当前状态”。
@@ -308,6 +333,8 @@ pub struct SourceState {
     pub updated_at: DateTime<Utc>,
     /// 这条状态的过期时间；为空表示不过期。
     pub expires_at: Option<DateTime<Utc>>,
+    /// 该状态对应事件的稳定语义。
+    pub semantics: EventSemantics,
 }
 
 /// `status --verbose` 输出中的单条来源明细。
@@ -329,6 +356,8 @@ pub struct StatusSourceEntry {
     pub capability: Option<AgentCapability>,
     /// source adapter 给出的建议模式。
     pub suggested_mode: Option<Mode>,
+    /// 该状态对应事件的稳定语义。
+    pub semantics: EventSemantics,
     /// 该来源状态在全局路由中的优先级。
     pub priority: u8,
     /// 距离过期还剩多少秒；为空表示不过期。
@@ -544,6 +573,8 @@ pub struct SendPayload {
     pub cwd: Option<String>,
     /// 当前 turn 标识。
     pub turn: Option<String>,
+    /// 由 source adapter 提炼出的稳定语义。
+    pub semantics: EventSemantics,
 }
 
 /// IPC 请求体。

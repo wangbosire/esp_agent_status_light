@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+use crate::adapters::source::fallback::FallbackAdapter;
 use crate::model::{AgentEvent, AppResult, HookParseContext};
 
 /// SourceAdapter 负责把不同 Agent 的 Hook stdin 归一成统一事件。
@@ -52,16 +53,10 @@ impl SourceAdapterRegistry {
     /// 这样可以满足“Hook 失败不阻断主流程”的要求：
     /// 即使某个宿主升级了字段结构，系统也至少还能退回显式 mode 或默认逻辑。
     pub fn parse_or_fallback(&self, input: Value, ctx: &HookParseContext) -> AgentEvent {
-        let fallback = self.get("*").expect("fallback adapter must be registered");
-
         // 指定来源解析失败时不会让 Hook 整体失败，而是回退到 lossy 解析，
         // 这与“Hook 失败不得阻塞 Agent 主流程”的设计目标一致。
         self.get(&ctx.source)
             .and_then(|adapter| adapter.parse(input.clone(), ctx).ok())
-            .unwrap_or_else(|| {
-                fallback
-                    .parse(input, ctx)
-                    .expect("fallback adapter should never fail")
-            })
+            .unwrap_or_else(|| FallbackAdapter.parse_lossy(input, ctx))
     }
 }

@@ -14,7 +14,7 @@ use super::*;
 use crate::adapters::device::mock::MockLightDevice;
 use crate::adapters::log::jsonl::JsonlLogAdapter;
 use crate::adapters::runtime::fs::FsRuntimeAdapter;
-use crate::model::{AppError, DeviceInfo, InstallManifest, IpcInfo};
+use crate::model::{AppError, DeviceInfo, EventSemantics, InstallManifest, IpcInfo};
 use crate::ports::log::EventLog;
 use crate::ports::runtime::RuntimeStore;
 use crate::ports::source::SourceAdapterRegistry;
@@ -173,6 +173,7 @@ fn send_payload(mode: Mode) -> SendPayload {
         suggested_mode: None,
         cwd: None,
         turn: None,
+        semantics: EventSemantics::Unknown,
     }
 }
 
@@ -241,6 +242,7 @@ async fn hook_state_flow_uses_latest_state_within_same_session() {
         suggested_mode: Some(Mode::Busy),
         cwd: Some("/tmp/project".into()),
         turn: Some("turn-1".into()),
+        semantics: EventSemantics::ExplicitToolExecution,
     };
     let response = daemon.handle_send("flow-1", busy).await;
     assert!(response.ok);
@@ -266,6 +268,7 @@ async fn hook_state_flow_uses_latest_state_within_same_session() {
         suggested_mode: Some(Mode::Error),
         cwd: Some("/tmp/project".into()),
         turn: Some("turn-1".into()),
+        semantics: EventSemantics::Failure,
     };
     let response = daemon.handle_send("flow-2", error).await;
     assert!(response.ok);
@@ -282,6 +285,7 @@ async fn hook_state_flow_uses_latest_state_within_same_session() {
         suggested_mode: Some(Mode::Success),
         cwd: Some("/tmp/project".into()),
         turn: Some("turn-1".into()),
+        semantics: EventSemantics::Completion,
     };
     let response = daemon.handle_send("flow-3", same_turn_success).await;
     assert!(response.ok);
@@ -303,6 +307,7 @@ async fn hook_state_flow_uses_latest_state_within_same_session() {
         suggested_mode: Some(Mode::Thinking),
         cwd: Some("/tmp/project".into()),
         turn: Some("turn-2".into()),
+        semantics: EventSemantics::Continuation,
     };
     let response = daemon.handle_send("flow-4", new_round_thinking).await;
     assert!(response.ok);
@@ -355,6 +360,7 @@ fn build_hook_request(
             .as_ref()
             .map(|cwd| cwd.to_string_lossy().to_string()),
         turn: event.turn.clone(),
+        semantics: event.semantics,
     };
     IpcRequestEnvelope::new(IpcRequestPayload::Send(payload))
 }

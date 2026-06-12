@@ -11,7 +11,7 @@ pub mod cursor;
 
 use serde_json::{Map, Value, json};
 
-use crate::model::HookCommand;
+use crate::model::{AppError, AppResult, HookCommand};
 use crate::ports::hook_install::HookInstallRegistry;
 use crate::ports::platform::PlatformAdapter;
 
@@ -36,13 +36,27 @@ fn is_managed_command(command: &str, hook_id: &str) -> bool {
 }
 
 /// 确保给定 JSON 值是对象，并返回其可变引用。
-fn ensure_object(value: &mut Value) -> &mut Map<String, Value> {
+fn ensure_object(value: &mut Value) -> AppResult<&mut Map<String, Value>> {
     // 某些宿主配置文件可能不存在或被用户写成非对象，
     // 这里统一强制转成空对象，后续逻辑才能稳定写入。
     if !value.is_object() {
         *value = Value::Object(Map::new());
     }
-    value.as_object_mut().expect("value should be object")
+    value
+        .as_object_mut()
+        .ok_or_else(|| AppError::new("invalid_config_shape", "config value must be an object"))
+}
+
+fn ensure_array<'a>(value: &'a mut Value, context: &str) -> AppResult<&'a mut Vec<Value>> {
+    if !value.is_array() {
+        *value = Value::Array(Vec::new());
+    }
+    value.as_array_mut().ok_or_else(|| {
+        AppError::new(
+            "invalid_config_shape",
+            format!("{context} must be an array"),
+        )
+    })
 }
 
 /// 将跨平台命令描述写入宿主配置对象。
@@ -59,11 +73,11 @@ fn decorate_command_fields(
 
 /// 从 Codex/Claude 风格的 hooks 结构中移除本工具托管条目。
 fn codex_like_uninstall(mut config: Value, hook_id: &str) -> Value {
-    let root = ensure_object(&mut config);
+    let root = ensure_object(&mut config).expect("config should be object after normalization");
     let hooks = root
         .entry("hooks")
         .or_insert_with(|| Value::Object(Map::new()));
-    let hooks_map = ensure_object(hooks);
+    let hooks_map = ensure_object(hooks).expect("hooks should be object after normalization");
     // Codex / Claude 的结构都是 “事件 -> matcher group -> hooks[]” 三层，
     // 卸载时只删掉带 hook_id 的命令，其它用户自定义 Hook 必须完整保留。
     for entries in hooks_map.values_mut() {
@@ -93,12 +107,12 @@ fn codex_like_uninstall(mut config: Value, hook_id: &str) -> Value {
 
 /// 从 Cursor 风格的 hooks 结构中移除本工具托管条目。
 fn cursor_uninstall(mut config: Value, hook_id: &str) -> Value {
-    let root = ensure_object(&mut config);
+    let root = ensure_object(&mut config).expect("config should be object after normalization");
     root.entry("version").or_insert_with(|| json!(1));
     let hooks = root
         .entry("hooks")
         .or_insert_with(|| Value::Object(Map::new()));
-    let hooks_map = ensure_object(hooks);
+    let hooks_map = ensure_object(hooks).expect("hooks should be object after normalization");
     // Cursor 的结构更扁平，是 “事件 -> command[]”；
     // 因此这里按 command 字段直接筛掉本工具写入的条目。
     for entries in hooks_map.values_mut() {
@@ -113,6 +127,75 @@ fn cursor_uninstall(mut config: Value, hook_id: &str) -> Value {
         });
     }
     config
+}
+
+pub(crate) fn install_codex_like_hooks(
+    mut config: Value,
+    specs: &[crate::model::HookSpec],
+    hook_id: &str,
+    platform: &dyn PlatformAdapter,
+    command_timeout: Option<u64>,
+    status_message: Option<&str>,
+) -> AppResult<Value> {
+    config = codex_like_uninstall(config, hook_id);
+    let root = ensure_object(&mut config)?;
+    let hooks = root.entry("hooks").or_insert_with(|| json!({}));
+    let hooks_map = ensure_object(hooks)?;
+
+    for spec in specs {
+        let entry = hooks_map
+            .entry(spec.event.clone())
+            .or_insert_with(|| json!([]));
+        let items = ensure_array(entry, &format!("hooks.{}", spec.event))?;
+        let mut group = json!({
+            "hooks": [{
+                "type": "command"
+            }]
+        });
+        if let Some(timeout) = command_timeout {
+            group["hooks"][0]["timeout"] = json!(timeout);
+        }
+        if let Some(message) = status_message {
+            group["hooks"][0]["statusMessage"] = json!(message);
+        }
+        let mut hook_value = json!({});
+        decorate_command_fields(platform, &mut hook_value, &spec.command);
+        group["hooks"][0] = hook_value;
+        if let Some(matcher) = &spec.matcher {
+            group["matcher"] = json!(matcher);
+        }
+        items.push(group);
+    }
+
+    Ok(config)
+}
+
+pub(crate) fn install_cursor_like_hooks(
+    mut config: Value,
+    specs: &[crate::model::HookSpec],
+    hook_id: &str,
+    platform: &dyn PlatformAdapter,
+) -> AppResult<Value> {
+    config = cursor_uninstall(config, hook_id);
+    let root = ensure_object(&mut config)?;
+    root.entry("version").or_insert_with(|| json!(1));
+    let hooks = root.entry("hooks").or_insert_with(|| json!({}));
+    let hooks_map = ensure_object(hooks)?;
+
+    for spec in specs {
+        let entry = hooks_map
+            .entry(spec.event.clone())
+            .or_insert_with(|| json!([]));
+        let items = ensure_array(entry, &format!("hooks.{}", spec.event))?;
+        let mut item = json!({});
+        decorate_command_fields(platform, &mut item, &spec.command);
+        if let Some(matcher) = &spec.matcher {
+            item["matcher"] = json!(matcher);
+        }
+        items.push(item);
+    }
+
+    Ok(config)
 }
 
 // 测试实现拆到独立目录，避免与 Hook 安装/卸载公共逻辑混写在同一个文件里。

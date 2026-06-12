@@ -108,3 +108,63 @@ fn decorate_command_fields_adds_windows_overrides_only_when_needed() {
     assert_eq!(windows_value["commandWindows"], "WIN:/tmp/esp");
     assert_eq!(windows_value["command_windows"], "WIN:/tmp/esp");
 }
+
+#[test]
+fn codex_like_install_recovers_from_non_object_shapes() {
+    let specs = vec![crate::model::HookSpec {
+        target: "codex".into(),
+        event: "SessionStart".into(),
+        matcher: None,
+        fallback_mode: crate::model::Mode::Green,
+        ttl: std::time::Duration::from_secs(30),
+        command: HookCommand {
+            exe: PathBuf::from("/tmp/esp"),
+            args: vec!["send".into()],
+        },
+    }];
+
+    let installed = install_codex_like_hooks(
+        json!({"hooks": {"SessionStart": "broken"}}),
+        &specs,
+        "agent-status-light",
+        &TestPlatform { windows: false },
+        Some(10),
+        Some("Updating AgentStatusLight"),
+    )
+    .expect("install should recover from non-array hook entries");
+
+    assert!(installed["hooks"]["SessionStart"].is_array());
+    assert_eq!(
+        installed["hooks"]["SessionStart"][0]["hooks"][0]["command"],
+        "POSIX:/tmp/esp"
+    );
+}
+
+#[test]
+fn cursor_like_install_recovers_from_non_array_shapes() {
+    let specs = vec![crate::model::HookSpec {
+        target: "cursor".into(),
+        event: "sessionStart".into(),
+        matcher: None,
+        fallback_mode: crate::model::Mode::Green,
+        ttl: std::time::Duration::from_secs(30),
+        command: HookCommand {
+            exe: PathBuf::from("/tmp/esp"),
+            args: vec!["send".into()],
+        },
+    }];
+
+    let installed = install_cursor_like_hooks(
+        json!({"hooks": {"sessionStart": "broken"}}),
+        &specs,
+        "agent-status-light",
+        &TestPlatform { windows: false },
+    )
+    .expect("install should recover from non-array cursor entries");
+
+    assert!(installed["hooks"]["sessionStart"].is_array());
+    assert_eq!(
+        installed["hooks"]["sessionStart"][0]["command"],
+        "POSIX:/tmp/esp"
+    );
+}

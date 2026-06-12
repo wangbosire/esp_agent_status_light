@@ -10,6 +10,7 @@ mod daemon;
 mod model;
 mod ports;
 mod router;
+mod runtime_lock;
 
 use clap::Parser;
 use tracing_subscriber::EnvFilter;

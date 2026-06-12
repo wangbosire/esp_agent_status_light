@@ -109,3 +109,22 @@ fn runtime_log_keeps_only_last_3000_entries() {
 
     let _ = std::fs::remove_dir_all(runtime.runtime_root());
 }
+
+#[test]
+fn corrupted_lock_file_is_recovered_on_next_append() {
+    let runtime = Arc::new(FsRuntimeAdapter::new(temp_runtime_root("corrupt-lock")));
+    runtime.ensure_layout().expect("layout should succeed");
+    let lock_path = runtime.runtime_log_path().with_extension("lock");
+    std::fs::write(&lock_path, "not-a-pid").expect("write broken lock");
+
+    let adapter = JsonlLogAdapter::new(runtime.clone());
+    adapter
+        .append_runtime(sample_event(1))
+        .expect("append_runtime should recover from broken lock file");
+
+    let runtime_raw =
+        std::fs::read_to_string(runtime.runtime_log_path()).expect("read runtime log");
+    assert!(runtime_raw.contains("message-1"));
+
+    let _ = std::fs::remove_dir_all(runtime.runtime_root());
+}

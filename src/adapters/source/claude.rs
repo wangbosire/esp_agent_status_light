@@ -4,7 +4,9 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::adapters::source::build_event;
-use crate::model::{AgentCapability, AgentEvent, AppError, AppResult, HookParseContext, Mode};
+use crate::model::{
+    AgentCapability, AgentEvent, AppError, AppResult, EventSemantics, HookParseContext, Mode,
+};
 use crate::ports::source::SourceAdapter;
 
 #[allow(dead_code)]
@@ -41,7 +43,17 @@ impl SourceAdapter for ClaudeAdapter {
             ctx.explicit_mode,
         );
 
-        Ok(build_event(ctx, &input, capability, suggested_mode))
+        Ok(build_event(
+            ctx,
+            &input,
+            capability,
+            suggested_mode,
+            semantics_for_claude(
+                raw.hook_event_name.as_deref(),
+                raw.tool_name.as_deref(),
+                raw.reason.as_deref(),
+            ),
+        ))
     }
 }
 
@@ -90,6 +102,50 @@ fn map_claude_mode(
             _ => (AgentCapability::RunningCommand, Some(Mode::Busy)),
         },
         _ => (AgentCapability::Unknown, None),
+    }
+}
+
+fn semantics_for_claude(
+    raw_event: Option<&str>,
+    tool_name: Option<&str>,
+    reason: Option<&str>,
+) -> EventSemantics {
+    match raw_event.unwrap_or_default() {
+        "SessionStart" => EventSemantics::Continuation,
+        "UserPromptSubmit" | "SubagentStart" | "PreCompact" | "PostCompact" => {
+            EventSemantics::Continuation
+        }
+        "PermissionRequest" | "Notification" => EventSemantics::UserAttention,
+        "PermissionDenied" | "PostToolUseFailure" | "StopFailure" => EventSemantics::Failure,
+        "PostToolUse" => EventSemantics::Continuation,
+        "PostToolBatch" => {
+            if matches!(
+                reason,
+                Some("aborted" | "error" | "window_close" | "user_close")
+            ) {
+                EventSemantics::Failure
+            } else {
+                EventSemantics::Continuation
+            }
+        }
+        "SessionEnd" => {
+            if matches!(
+                reason,
+                Some("aborted" | "error" | "window_close" | "user_close")
+            ) {
+                EventSemantics::Failure
+            } else {
+                EventSemantics::Completion
+            }
+        }
+        "SubagentStop" | "Stop" => EventSemantics::Completion,
+        "PreToolUse" => match tool_name.unwrap_or_default() {
+            "Read" => EventSemantics::FileRead,
+            "Edit" | "MultiEdit" | "Write" => EventSemantics::FileWrite,
+            "Bash" => EventSemantics::ExplicitToolExecution,
+            _ => EventSemantics::ExplicitToolExecution,
+        },
+        _ => EventSemantics::Unknown,
     }
 }
 

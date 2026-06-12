@@ -40,7 +40,7 @@ impl HookInstallAdapter for ClaudeInstallAdapter {
             spec(exe, "PreToolUse", Some("MultiEdit"), Mode::Ai, 900),
             spec(exe, "PreToolUse", Some("Write"), Mode::Ai, 900),
             spec(exe, "PermissionRequest", None, Mode::Alarm, 1800),
-            spec(exe, "Notification", None, Mode::Alarm, 1800),
+            // spec(exe, "Notification", None, Mode::Alarm, 1800),
             // Claude 用户确认后，通常会继续触发 PostToolUse。
             // 这里补上对应 Hook，确保 alarm 能及时回到 busy/ai。
             spec(exe, "PostToolUse", Some("Bash"), Mode::Busy, 1800),

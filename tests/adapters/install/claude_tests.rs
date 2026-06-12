@@ -46,6 +46,7 @@ fn claude_install_generates_post_tool_use_hooks_to_clear_alarm() {
             "/tmp/esp send --mode green --source claude --session auto --ttl 900 --quiet --hook-id agent-status-light"
         )
     );
+    assert_eq!(session_start_hooks[0]["hooks"][0]["type"], json!("command"));
 
     let hooks = installed["hooks"]["PostToolUse"]
         .as_array()
@@ -80,4 +81,5 @@ fn claude_install_generates_post_tool_use_hooks_to_clear_alarm() {
         .as_array()
         .expect("PostToolBatch hooks should exist");
     assert_eq!(batch_hooks.len(), 1);
+    assert_eq!(batch_hooks[0]["hooks"][0]["type"], json!("command"));
 }

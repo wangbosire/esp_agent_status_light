@@ -175,6 +175,9 @@ pub(crate) fn install_codex_like_hooks(
         // 真正的命令字段完全交给平台层决定，
         // 安装器只负责“什么时候写什么 Hook”，不关心引用转义细节。
         decorate_command_fields(platform, &mut hook_value, &spec.command);
+        // Claude / Codex 这类宿主要求每个 hook 明确声明类型，
+        // 否则配置文件虽然能写出来，但宿主不会把它当成可执行命令 hook。
+        hook_value["type"] = json!("command");
         group["hooks"][0] = hook_value;
         if let Some(matcher) = &spec.matcher {
             group["matcher"] = json!(matcher);

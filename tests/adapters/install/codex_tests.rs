@@ -46,6 +46,7 @@ fn codex_install_generates_green_session_start_hook() {
             "/tmp/esp send --mode green --source codex --session auto --ttl 900 --quiet --hook-id agent-status-light"
         )
     );
+    assert_eq!(session_start_hooks[0]["hooks"][0]["type"], json!("command"));
 
     let pre_tool_hooks = installed["hooks"]["PreToolUse"]
         .as_array()
@@ -73,5 +74,11 @@ fn codex_install_generates_green_session_start_hook() {
                     )
         }),
         "PostToolUse should contain Read -> ai hook"
+    );
+    assert!(
+        post_tool_hooks
+            .iter()
+            .all(|group| group["hooks"][0]["type"] == json!("command")),
+        "every codex hook entry should declare type=command"
     );
 }

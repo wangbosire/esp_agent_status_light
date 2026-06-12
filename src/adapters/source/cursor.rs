@@ -124,6 +124,8 @@ fn semantics_for_cursor(
     status: Option<&str>,
     reason: Option<&str>,
 ) -> EventSemantics {
+    // Cursor 的 stop/subagentStop 同时要看状态字段，
+    // 因为同一个事件名既可能表示成功结束，也可能表示失败/中止。
     match raw_event.unwrap_or_default() {
         "sessionStart" | "workspaceOpen" => EventSemantics::Continuation,
         "beforeSubmitPrompt" | "afterAgentThought" | "subagentStart" | "preCompact" => {

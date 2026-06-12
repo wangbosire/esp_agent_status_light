@@ -18,10 +18,12 @@ pub struct LinuxAdapter;
 
 impl PlatformAdapter for LinuxAdapter {
     fn runtime_root(&self) -> AppResult<PathBuf> {
+        // Linux 目前直接复用 Unix 目录布局，保持与 macOS 的使用习惯一致。
         unix_runtime_root()
     }
 
     fn default_ipc_adapter(&self, ipc_path: &Path) -> Box<dyn IpcTransport> {
+        // Linux 默认优先使用 Unix Domain Socket，简单且无需额外端口管理。
         Box::new(UnixSocketTransport::new(ipc_path.to_path_buf()))
     }
 
@@ -30,10 +32,12 @@ impl PlatformAdapter for LinuxAdapter {
     }
 
     fn decorate_hook_command(&self, object: &mut Value, command: &HookCommand) {
+        // Linux/macOS 宿主普遍只认标准 `command` 字段，因此这里只写这一份。
         object["command"] = json!(self.quote_hook_command(command));
     }
 
     fn spawn_background_daemon(&self, exe: &Path) -> AppResult<()> {
+        // 后台拉起策略复用平台公共实现，避免每个 Unix 平台各写一套子进程细节。
         spawn_background(exe)
     }
 }

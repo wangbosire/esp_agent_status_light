@@ -32,6 +32,7 @@ impl LightDevice for MockLightDevice {
     }
 
     async fn read_mode(&mut self) -> AppResult<Option<Mode>> {
+        // 读取直接返回本地缓存，足以覆盖单元测试对“最近一次写入”的断言需求。
         Ok(self.mode)
     }
 

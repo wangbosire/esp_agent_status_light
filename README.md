@@ -18,6 +18,12 @@ docs/USER_MANUAL.md
 docs/TECHNICAL_DESIGN.md
 ```
 
+基于当前代码实现整理的系统架构图、时序图和安装链路图见：
+
+```text
+docs/ARCHITECTURE.md
+```
+
 技术方案约定电脑端整体采用 Adapter 模式：Agent stdin、Hook 安装、IPC、BLE、runtime、日志和平台差异都通过独立 adapter 接入，核心只处理统一事件、状态路由和灯效模式。
 
 ***

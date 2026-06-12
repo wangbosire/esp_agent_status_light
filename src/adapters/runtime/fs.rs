@@ -34,6 +34,7 @@ impl FsRuntimeAdapter {
     }
 
     fn write_atomic(&self, path: PathBuf, raw: String, context: &str) -> AppResult<()> {
+        // 先写临时文件，再替换目标文件，避免异常中断时留下半写内容。
         let tmp_path = path.with_extension(format!(
             "{}.tmp.{}",
             path.extension()
@@ -89,6 +90,7 @@ impl RuntimeStore for FsRuntimeAdapter {
         if !path.exists() {
             return Ok(None);
         }
+        // pid 文件只保存一个数字，不需要复杂格式。
         let raw = fs::read_to_string(path).map_err(|err| AppError::io("read pid file", err))?;
         raw.trim()
             .parse::<u32>()
@@ -103,6 +105,7 @@ impl RuntimeStore for FsRuntimeAdapter {
     fn clear_pid(&self) -> AppResult<()> {
         let path = self.pid_path();
         if path.exists() {
+            // pid 文件只是一个状态提示，清理失败不应影响主流程继续收尾。
             fs::remove_file(path).map_err(|err| AppError::io("remove pid file", err))?;
         }
         Ok(())
@@ -113,6 +116,7 @@ impl RuntimeStore for FsRuntimeAdapter {
         if !path.exists() {
             return Ok(None);
         }
+        // IPC 元信息采用 pretty JSON 写入，但读取时仍按普通 JSON 解析。
         let raw = fs::read_to_string(path).map_err(|err| AppError::io("read ipc info", err))?;
         serde_json::from_str(&raw)
             .map(Some)
@@ -128,6 +132,7 @@ impl RuntimeStore for FsRuntimeAdapter {
     fn clear_ipc_info(&self) -> AppResult<()> {
         let path = self.ipc_info_path();
         if path.exists() {
+            // 与 pid 文件一致，ipc 元信息也是“尽力清理”语义。
             fs::remove_file(path).map_err(|err| AppError::io("remove ipc info", err))?;
         }
         Ok(())
@@ -151,6 +156,7 @@ fn replace_file(from: &Path, to: &Path, context: &str) -> AppResult<()> {
         Err(rename_err) => {
             if to.exists() {
                 fs::remove_file(to).map_err(|err| AppError::io(context, err))?;
+                // 再试一次 rename，覆盖大多数平台上“目标已存在”导致的失败。
                 fs::rename(from, to).map_err(|err| AppError::io(context, err))
             } else {
                 Err(AppError::io(context, rename_err))

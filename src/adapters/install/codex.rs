@@ -20,6 +20,7 @@ impl HookInstallAdapter for CodexInstallAdapter {
     }
 
     fn config_path(&self, scope: &InstallScope) -> AppResult<PathBuf> {
+        // Codex 既支持用户级 hooks，也支持项目级 `.codex/hooks.json`。
         Ok(match scope {
             InstallScope::Global => user_home_dir()?.join(".codex").join("hooks.json"),
             InstallScope::Project(root) => root.join(".codex").join("hooks.json"),
@@ -59,6 +60,7 @@ impl HookInstallAdapter for CodexInstallAdapter {
         hook_id: &str,
         platform: &dyn PlatformAdapter,
     ) -> AppResult<Value> {
+        // Codex/Claude 共用三层 hooks 结构，因此直接复用公共安装 helper。
         install_codex_like_hooks(
             config,
             specs,
@@ -78,6 +80,9 @@ impl HookInstallAdapter for CodexInstallAdapter {
 fn spec(exe: &Path, event: &str, matcher: Option<&str>, mode: Mode, ttl: u64) -> HookSpec {
     // 每条 Hook 都以 `esp send ... --quiet --hook-id agent-status-light` 的稳定形式生成，
     // 便于后续卸载和排障。
+    //
+    // 这里不把宿主配置格式直接写死在 adapter 内部，
+    // 只描述“某个事件要触发哪条命令”，最终 JSON 结构由公共 helper 负责组装。
     HookSpec {
         target: "codex".into(),
         event: event.into(),

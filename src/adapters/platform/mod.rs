@@ -15,6 +15,7 @@ use crate::ports::platform::PlatformAdapter;
 
 /// 根据当前目标平台选择默认平台适配器。
 pub fn current_platform() -> Box<dyn PlatformAdapter> {
+    // 平台选择集中在这里，避免上层到处写 `cfg` 分支。
     #[cfg(target_os = "macos")]
     {
         Box::new(macos::MacosAdapter)
@@ -31,6 +32,8 @@ pub fn current_platform() -> Box<dyn PlatformAdapter> {
 
 /// 解析当前用户 home 目录。
 pub(crate) fn user_home_dir() -> AppResult<PathBuf> {
+    // 优先读取各平台最常见的 home 环境变量。
+    // 这里不直接依赖第三方目录库，是为了减少安装工具链/交叉平台时的依赖面。
     if let Ok(home) = env::var("HOME") {
         return Ok(StdPathBuf::from(home));
     }
@@ -74,6 +77,7 @@ pub(crate) fn windows_runtime_root() -> AppResult<PathBuf> {
 /// 将命令渲染为 POSIX shell 可直接执行的字符串。
 pub(crate) fn shell_quote(command: &HookCommand) -> String {
     // POSIX shell quoting：尽量直出安全字符，必要时再用单引号包裹。
+    // 这里不直接拼 `Command`，因为安装器最终需要写入的是宿主工具配置里的字符串命令。
     let exe = quote_shell_token(command.exe.to_string_lossy().as_ref());
     let args = command
         .args
@@ -107,6 +111,7 @@ pub(crate) fn windows_shell_quote(command: &HookCommand) -> String {
 
 /// 对单个 POSIX shell token 做安全引用。
 pub(crate) fn quote_shell_token(value: &str) -> String {
+    // 安全字符集合尽量宽一点，避免常见路径/参数被过度引用，影响可读性。
     if value
         .chars()
         .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '/' | '.'))
@@ -119,6 +124,7 @@ pub(crate) fn quote_shell_token(value: &str) -> String {
 
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn quote_windows_token(value: &str) -> String {
+    // Windows token 规则和 POSIX 完全不同，因此必须单独维护引用逻辑。
     if value
         .chars()
         .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '/' | '\\' | '.' | ':'))
@@ -135,6 +141,8 @@ pub(crate) fn quote_windows_token(value: &str) -> String {
 /// 外层命令只负责把它从当前终端交互中脱离。
 pub(crate) fn spawn_background(exe: &Path) -> AppResult<()> {
     // 第一阶段使用最朴素的子进程 detach 方式即可，避免引入平台专属后台服务机制。
+    // 真正的服务逻辑仍然运行在 `esp daemon --foreground` 这条路径上，
+    // 这样前台和后台模式共享同一套 daemon 主流程。
     Command::new(exe)
         .arg("daemon")
         .arg("--foreground")

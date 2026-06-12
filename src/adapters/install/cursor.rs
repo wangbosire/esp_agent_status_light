@@ -20,6 +20,7 @@ impl HookInstallAdapter for CursorInstallAdapter {
     }
 
     fn config_path(&self, scope: &InstallScope) -> AppResult<PathBuf> {
+        // Cursor 的项目级配置也放在仓库内 `.cursor/hooks.json`，与全局路径平行。
         Ok(match scope {
             InstallScope::Global => user_home_dir()?.join(".cursor").join("hooks.json"),
             InstallScope::Project(root) => root.join(".cursor").join("hooks.json"),
@@ -61,6 +62,7 @@ impl HookInstallAdapter for CursorInstallAdapter {
         hook_id: &str,
         platform: &dyn PlatformAdapter,
     ) -> AppResult<Value> {
+        // Cursor hooks 结构比 Codex/Claude 更扁平，因此走专用公共 helper。
         install_cursor_like_hooks(config, specs, hook_id, platform)
     }
 
@@ -71,6 +73,8 @@ impl HookInstallAdapter for CursorInstallAdapter {
 
 /// 构造一条 Cursor Hook 规则定义。
 fn spec(exe: &Path, event: &str, matcher: Option<&str>, mode: Mode, ttl: u64) -> HookSpec {
+    // `fallback_mode` 和 `ttl` 都在这里显式固化，
+    // 这样 source adapter 与 install adapter 看到的是同一套规则基线。
     HookSpec {
         target: "cursor".into(),
         event: event.into(),

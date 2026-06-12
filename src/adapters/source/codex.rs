@@ -93,6 +93,8 @@ fn map_codex_mode(
 }
 
 fn semantics_for_codex(raw_event: Option<&str>, tool_name: Option<&str>) -> EventSemantics {
+    // 语义映射和 mode 映射分开维护：
+    // mode 偏向“现在灯该怎么亮”，语义偏向“这条事件在流程里意味着什么”。
     match raw_event.unwrap_or_default() {
         "SessionStart" | "SubagentStop" | "Stop" => EventSemantics::Completion,
         "UserPromptSubmit" | "PreCompact" | "PostCompact" | "SubagentStart" => {

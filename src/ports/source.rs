@@ -53,6 +53,8 @@ impl SourceAdapterRegistry {
     /// 这样可以满足“Hook 失败不阻断主流程”的要求：
     /// 即使某个宿主升级了字段结构，系统也至少还能退回显式 mode 或默认逻辑。
     pub fn parse_or_fallback(&self, input: Value, ctx: &HookParseContext) -> AgentEvent {
+        // 先尝试来源专属解析，再落到 fallback。
+        // 这样即使某个宿主字段升级了，也不会让整个 Hook 入口直接失效。
         // 指定来源解析失败时不会让 Hook 整体失败，而是回退到 lossy 解析，
         // 这与“Hook 失败不得阻塞 Agent 主流程”的设计目标一致。
         self.get(&ctx.source)

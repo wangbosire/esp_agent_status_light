@@ -27,6 +27,7 @@ use crate::ports::source::SourceAdapterRegistry;
 /// 3. 保持 fallback 适配器继续存在。
 pub fn registry() -> SourceAdapterRegistry {
     // 注册顺序本身不影响解析，但 fallback 必须始终存在。
+    // 如果某个具体 adapter 解析失败，registry 会自动回退到 fallback，保证 Hook 不阻断主流程。
     SourceAdapterRegistry::new()
         .with(codex::CodexAdapter)
         .with(cursor::CursorAdapter)
@@ -39,6 +40,7 @@ pub fn registry() -> SourceAdapterRegistry {
 pub fn extract_session_or_hash(input: &Value, ctx: &HookParseContext) -> String {
     // 字段优先级严格按照技术方案：
     // session_id -> conversation_id -> generation_id -> cwd -> workspace_roots[0] -> transcript_path -> hash。
+    // 这样做的目的，是尽量让同一轮任务在不同宿主里落到同一个稳定 session 上。
     string_field(
         input,
         &[
@@ -61,6 +63,8 @@ pub fn extract_session_or_hash(input: &Value, ctx: &HookParseContext) -> String 
     })
     .or_else(|| string_field(input, &["transcript_path"]))
     .unwrap_or_else(|| {
+        // 如果所有显式字段都没有，就用 source + cwd 做一个稳定 hash，
+        // 至少保证同一次运行不会每次都生成不同 session。
         let mut hasher = DefaultHasher::new();
         ctx.source.hash(&mut hasher);
         ctx.current_dir.hash(&mut hasher);
@@ -76,6 +80,7 @@ pub fn extract_session_or_hash(input: &Value, ctx: &HookParseContext) -> String 
 /// 3. 给日志和排障提供上下文。
 pub fn extract_cwd(input: &Value) -> Option<PathBuf> {
     // 优先使用显式 cwd；没有时再退回 workspaceRoots 的第一个根目录。
+    // 这个函数只负责“尽量提取一个合理 cwd”，不做任何路径有效性判断。
     string_field(input, &["cwd"])
         .map(PathBuf::from)
         .or_else(|| {
@@ -142,6 +147,7 @@ pub fn build_event(
 ) -> AgentEvent {
     // 所有来源最终都收敛到统一 `AgentEvent`，
     // 这正是 Adapter 模式在这里的核心价值。
+    // 上层 router 只看这个统一结构，不再关心宿主私有字段名。
     AgentEvent {
         source: AgentSource::new(ctx.source.clone()),
         session: extract_session_or_hash(input, ctx),

@@ -53,6 +53,9 @@ impl IpcTransport for NamedPipeTransport {
             let pipe_name = pipe_name_from_path(&self.path);
             // 命名管道在服务端尚未 ready 的启动窗口期，可能出现短暂 NotFound/busy，
             // 所以这里单独做重试等待。
+            //
+            // 这个重试只覆盖“命名管道实例短暂不可用”这一类启动窗口问题，
+            // 真正的序列化/读写错误仍然直接返回给上层。
             let mut client = timeout(Duration::from_secs(2), open_client_with_retry(&pipe_name))
                 .await
                 .map_err(|_| {
@@ -163,6 +166,7 @@ impl IpcServer for NamedPipeServer {
 fn pipe_name_from_path(path: &Path) -> String {
     let raw = path.to_string_lossy();
     if raw.starts_with(r"\\.\pipe\") {
+        // 已经是完整 pipe 名称时直接复用，方便测试或未来外部注入。
         return raw.into_owned();
     }
 
@@ -186,6 +190,7 @@ fn pipe_name_from_path(path: &Path) -> String {
 /// 清洗 pipe 名称中的可读部分，只保留安全字符。
 fn sanitize_pipe_component(value: &str) -> String {
     // pipe 名称只保留安全字符，其余统一替换成 `-`，避免宿主路径包含特殊字符。
+    // 同时统一转小写，让最终名字在日志里更稳定、可预测。
     value
         .chars()
         .map(|ch| {
@@ -213,6 +218,7 @@ async fn open_client_with_retry(
                     || err.raw_os_error() == Some(ERROR_PIPE_BUSY_CODE) =>
             {
                 // 服务端可能还没来得及创建下一个空闲实例，稍等片刻再试。
+                // 这里不把 busy/not-found 直接视作错误，是 named pipe 和 Unix socket 语义差异之一。
                 sleep(Duration::from_millis(50)).await;
             }
             Err(err) => return Err(AppError::io("open named pipe client", err)),
@@ -229,6 +235,7 @@ fn create_server_instance(
     first_instance: bool,
 ) -> AppResult<TokioNamedPipeServer> {
     // `first_pipe_instance(true)` 能帮助系统在重复启动时尽早暴露冲突。
+    // 只有第一份实例开启这个标志；后续预创建的空闲实例必须允许并存。
     let mut options = ServerOptions::new();
     options.first_pipe_instance(first_instance);
     options
@@ -243,6 +250,7 @@ async fn handle_pipe_stream(
     handler: Arc<dyn IpcRequestHandler>,
 ) -> AppResult<()> {
     // 与 Unix/TCP 传输保持完全一致的按行 JSON 协议，减少上层分支。
+    // 这样 daemon 层看到的始终是统一 envelope，不需要知道自己底下跑的是哪种 IPC。
     let mut line = String::new();
     {
         let mut reader = BufReader::new(&mut stream);

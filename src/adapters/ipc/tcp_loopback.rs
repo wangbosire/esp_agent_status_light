@@ -34,6 +34,7 @@ impl TcpLoopbackTransport {
 impl IpcTransport for TcpLoopbackTransport {
     async fn request(&self, req: IpcRequestEnvelope) -> AppResult<IpcResponseEnvelope> {
         // 逻辑与 Unix/named pipe 保持一致，同样使用单行 JSON 请求与响应。
+        // TCP 版本主要用于调试，因此这里不做额外复杂优化，只追求行为一致。
         let mut stream = timeout(Duration::from_secs(2), TcpStream::connect(self.addr))
             .await
             .map_err(|_| AppError::new("ipc_timeout", "connect tcp loopback timed out"))?
@@ -90,6 +91,7 @@ impl IpcServer for TcpLoopbackServer {
         handler: Arc<dyn IpcRequestHandler>,
         mut shutdown: watch::Receiver<bool>,
     ) -> AppResult<()> {
+        // 调试 server 不要求多实例/抢占式自恢复，只要能在本机回环口稳定收发即可。
         let listener = TcpListener::bind(self.addr)
             .await
             .map_err(|err| AppError::io("bind tcp loopback", err))?;

@@ -20,6 +20,7 @@ impl HookInstallAdapter for ClaudeInstallAdapter {
     }
 
     fn config_path(&self, scope: &InstallScope) -> AppResult<PathBuf> {
+        // Claude 当前使用 `settings.json`，而不是单独的 hooks 文件。
         Ok(match scope {
             InstallScope::Global => user_home_dir()?.join(".claude").join("settings.json"),
             InstallScope::Project(root) => root.join(".claude").join("settings.json"),
@@ -70,6 +71,7 @@ impl HookInstallAdapter for ClaudeInstallAdapter {
         hook_id: &str,
         platform: &dyn PlatformAdapter,
     ) -> AppResult<Value> {
+        // Claude 与 Codex 结构相近，但不需要 Codex 那个 `statusMessage` 字段。
         install_codex_like_hooks(config, specs, hook_id, platform, Some(10), None)
     }
 
@@ -80,6 +82,8 @@ impl HookInstallAdapter for ClaudeInstallAdapter {
 
 /// 构造一条 Claude Hook 规则定义。
 fn spec(exe: &Path, event: &str, matcher: Option<&str>, mode: Mode, ttl: u64) -> HookSpec {
+    // Claude 的每条规则同样只表达“事件 -> esp send 命令”，
+    // 由公共 helper 再翻译成宿主要求的 hooks 数组结构。
     HookSpec {
         target: "claude".into(),
         event: event.into(),

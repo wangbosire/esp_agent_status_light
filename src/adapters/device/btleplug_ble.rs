@@ -13,6 +13,11 @@ use crate::ports::device::LightDevice;
 /// 真实 BLE adapter 尽量保持“失败可恢复”：
 /// 1. daemon 可以先接受 IPC，再慢慢等待蓝牙恢复。
 /// 2. 即便当前没有连上设备，也要把 health 信息暴露给 `status --verbose`。
+///
+/// 这里不做任何“状态路由”判断，只负责：
+/// - 找到目标设备；
+/// - 建立 GATT 连接；
+/// - 把 mode 字符串写入固件暴露的特征值。
 pub struct BtleplugBleAdapter {
     /// 目标 BLE 设备名称。
     device_name: String,
@@ -32,6 +37,7 @@ impl Default for BtleplugBleAdapter {
     fn default() -> Self {
         Self {
             // UUID 必须与固件中的 GATT 服务保持严格一致。
+            // 这里用 `from_u128` 直接构造，避免在默认构造路径里引入 fallible parse。
             device_name: "AgentStatusLight".into(),
             service_uuid: Uuid::from_u128(0xb8b7e0017a6b4f4f9a8b11c0ffee0001),
             mode_char_uuid: Uuid::from_u128(0xb8b7e0027a6b4f4f9a8b11c0ffee0001),
@@ -47,6 +53,9 @@ impl LightDevice for BtleplugBleAdapter {
     async fn connect(&mut self) -> AppResult<DeviceInfo> {
         // 每次 connect 都重新拿系统蓝牙 adapter，
         // 这样在蓝牙子系统重置后更容易恢复。
+        //
+        // 代价是每次连接都会重新扫描，但当前 daemon 的连接频率很低，
+        // 更重要的是保证“掉线后能自己恢复”。
         let manager = Manager::new()
             .await
             .map_err(|err| AppError::new("ble_manager_init_failed", err.to_string()))?;
@@ -71,6 +80,7 @@ impl LightDevice for BtleplugBleAdapter {
             })?;
 
         if !peripheral.is_connected().await.unwrap_or(false) {
+            // 某些平台扫描后返回的 peripheral 只是“发现了设备”，并不代表已连接。
             peripheral
                 .connect()
                 .await
@@ -93,6 +103,8 @@ impl LightDevice for BtleplugBleAdapter {
             })?;
 
         self.health.connected = true;
+        // 连接成功后，把最后一次“看见的设备名”缓存到 health 里，
+        // 即使后面短暂掉线，`status --verbose` 也还能告诉用户刚刚连接的是哪台设备。
         self.health.device_name = properties
             .local_name
             .clone()
@@ -165,6 +177,8 @@ impl LightDevice for BtleplugBleAdapter {
     }
 
     async fn health(&self) -> DeviceHealth {
+        // health 只暴露本 adapter 当前缓存的快照，不做额外 IO，
+        // 避免 `status` 命令反过来触发新的蓝牙读写行为。
         self.health.clone()
     }
 }
@@ -178,6 +192,9 @@ impl BtleplugBleAdapter {
     async fn scan_target(&mut self, adapter: Adapter) -> AppResult<Peripheral> {
         // 第一阶段采用简单全量扫描 + 最佳候选选择策略：
         // 满足“名称匹配或服务 UUID 匹配”即可，再从中选择 RSSI 最强者。
+        //
+        // 之所以不把扫描窗口做得更短，是因为部分平台蓝牙栈需要一点时间
+        // 才能把 advertisement/service 信息补全。
         adapter
             .start_scan(ScanFilter::default())
             .await
@@ -204,6 +221,7 @@ impl BtleplugBleAdapter {
                 .as_deref()
                 .is_some_and(|name| name == self.device_name);
             let service_matches = properties.services.contains(&self.service_uuid);
+            // 名称匹配便于开发阶段人工识别，服务 UUID 匹配则能覆盖重命名设备等情况。
             if !name_matches && !service_matches {
                 continue;
             }

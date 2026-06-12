@@ -63,6 +63,7 @@ impl HookInstallRegistry {
     /// 找不到时在这里统一返回稳定错误，命令层无需再自己拼错误文案。
     pub fn get(&self, target: &str) -> AppResult<Arc<dyn HookInstallAdapter>> {
         // 未知目标在这里统一报错，避免命令层了解各家实现细节。
+        // 这样命令层只需要处理“找得到安装器/找不到安装器”两种结果。
         self.adapters.get(target).cloned().ok_or_else(|| {
             AppError::new(
                 "unknown_install_target",

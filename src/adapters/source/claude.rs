@@ -110,6 +110,8 @@ fn semantics_for_claude(
     tool_name: Option<&str>,
     reason: Option<&str>,
 ) -> EventSemantics {
+    // Claude 的 `reason` 字段在结束类事件里语义很关键：
+    // 没有它时，SessionEnd 和 PostToolBatch 都不足以区分“自然结束”还是“异常中止”。
     match raw_event.unwrap_or_default() {
         "SessionStart" => EventSemantics::Continuation,
         "UserPromptSubmit" | "SubagentStart" | "PreCompact" | "PostCompact" => {

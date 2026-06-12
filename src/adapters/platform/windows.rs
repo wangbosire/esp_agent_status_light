@@ -16,10 +16,12 @@ pub struct WindowsAdapter;
 
 impl PlatformAdapter for WindowsAdapter {
     fn runtime_root(&self) -> AppResult<PathBuf> {
+        // Windows 运行时目录优先落在 LocalAppData，避免污染用户文档目录。
         windows_runtime_root()
     }
 
     fn default_ipc_adapter(&self, ipc_path: &Path) -> Box<dyn IpcTransport> {
+        // Windows 默认使用 named pipe，而不是伪造 Unix 风格路径。
         Box::new(NamedPipeTransport::new(ipc_path.to_path_buf()))
     }
 
@@ -37,6 +39,7 @@ impl PlatformAdapter for WindowsAdapter {
     }
 
     fn spawn_background_daemon(&self, exe: &Path) -> AppResult<()> {
+        // 暂时仍复用公共 spawn 策略，保持平台间的后台启动行为一致。
         spawn_background(exe)
     }
 }

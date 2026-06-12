@@ -41,6 +41,8 @@ impl IpcTransport for UnixSocketTransport {
         #[cfg(unix)]
         {
             // 客户端请求采用短超时，避免 Hook 卡在 daemon 不可用的场景中。
+            // 这里分开限制 connect/read 两段超时，是为了让错误定位更清楚：
+            // 到底是连不上 daemon，还是 daemon 收到了但没及时响应。
             let mut stream = timeout(Duration::from_secs(2), UnixStream::connect(&self.path))
                 .await
                 .map_err(|_| AppError::new("ipc_timeout", "connect daemon ipc timed out"))?
@@ -63,6 +65,7 @@ impl IpcTransport for UnixSocketTransport {
 
             let mut reader = BufReader::new(stream);
             let mut line = String::new();
+            // 协议约定服务端一行返回一个完整 JSON 响应，因此读到换行即可完成一次 RPC。
             timeout(Duration::from_secs(2), reader.read_line(&mut line))
                 .await
                 .map_err(|_| AppError::new("ipc_timeout", "read daemon ipc response timed out"))?
@@ -114,6 +117,8 @@ impl IpcServer for UnixSocketServer {
         #[cfg(unix)]
         {
             // 遗留 socket 文件不应导致下次启动失败，因此先尽力清理。
+            // 这里不做更复杂的“验证它是不是自己创建的 socket”判断，
+            // 因为 runtime 目录本身已经是本项目私有空间。
             if self.path.exists() {
                 let _ = std::fs::remove_file(&self.path);
             }
@@ -130,6 +135,7 @@ impl IpcServer for UnixSocketServer {
                     }
                     accept_result = listener.accept() => {
                         // 每个连接独立起任务处理，避免单个慢请求阻塞后续 Hook。
+                        // 单连接任务内部仍然只处理一条请求，协议保持最简单的 request-response 模式。
                         let (stream, _) = accept_result.map_err(|err| AppError::io("accept unix socket", err))?;
                         let handler = handler.clone();
                         tokio::spawn(async move {

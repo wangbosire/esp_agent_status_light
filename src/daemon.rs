@@ -83,7 +83,7 @@ impl Daemon {
     pub async fn run(self: Arc<Self>, server: Arc<dyn IpcServer>) -> AppResult<()> {
         // daemon 启动时先写入运行时元信息，便于命令层自动发现与自恢复。
         self.runtime.ensure_layout()?;
-        self.acquire_startup_lock()?;
+        self.acquire_startup_lock().await?;
         self.runtime.write_pid(std::process::id())?;
         self.runtime.write_ipc_info(&server.info())?;
         self.append_log("daemon", "daemon started", None, None, None, None)?;
@@ -127,7 +127,7 @@ impl Daemon {
 
         let _ = self.runtime.clear_pid();
         let _ = self.runtime.clear_ipc_info();
-        let _ = self.release_startup_lock();
+        let _ = self.release_startup_lock().await;
         let _ = self.append_log("daemon", "daemon stopped", None, None, None, None);
 
         serve_result
@@ -540,16 +540,18 @@ impl Daemon {
         IpcResponseEnvelope::ok(request_id.to_string(), "stopping")
     }
 
-    fn acquire_startup_lock(&self) -> AppResult<()> {
+    async fn acquire_startup_lock(&self) -> AppResult<()> {
         let lock_path = self.runtime.runtime_dir().join("daemon.lock");
         let lock = FileLock::acquire(lock_path)?;
-        let mut guard = self.startup_lock.blocking_lock();
+        // `run()` 自身运行在 Tokio runtime 内，这里如果使用 `blocking_lock()`，
+        // 会因为在 runtime 线程上做阻塞等待而直接 panic。
+        let mut guard = self.startup_lock.lock().await;
         *guard = Some(lock);
         Ok(())
     }
 
-    fn release_startup_lock(&self) -> AppResult<()> {
-        let mut guard = self.startup_lock.blocking_lock();
+    async fn release_startup_lock(&self) -> AppResult<()> {
+        let mut guard = self.startup_lock.lock().await;
         let _ = guard.take();
         Ok(())
     }

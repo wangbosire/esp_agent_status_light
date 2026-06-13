@@ -330,6 +330,33 @@ fn temp_runtime_root(name: &str) -> PathBuf {
     root
 }
 
+#[tokio::test]
+async fn startup_lock_can_be_acquired_inside_tokio_runtime() {
+    let runtime_root = temp_runtime_root("startup-lock");
+    let runtime: Arc<dyn RuntimeStore> = Arc::new(FsRuntimeAdapter::new(runtime_root.clone()));
+    runtime.ensure_layout().expect("layout should succeed");
+
+    let daemon = Daemon::new(
+        runtime.clone(),
+        Arc::new(TestEventLog),
+        Box::new(MockLightDevice::default()),
+    );
+
+    daemon
+        .acquire_startup_lock()
+        .await
+        .expect("startup lock should be acquired inside async runtime");
+    assert!(runtime.runtime_dir().join("daemon.lock").exists());
+
+    daemon
+        .release_startup_lock()
+        .await
+        .expect("startup lock should be released inside async runtime");
+    assert!(!runtime.runtime_dir().join("daemon.lock").exists());
+
+    let _ = std::fs::remove_dir_all(runtime_root);
+}
+
 fn build_hook_request(
     registry: &SourceAdapterRegistry,
     source: &str,

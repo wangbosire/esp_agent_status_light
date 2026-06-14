@@ -4,11 +4,15 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::Value;
 use tokio::sync::Mutex;
+use tokio::sync::oneshot;
+use tokio::task::yield_now;
+use tokio::time::{sleep, timeout};
 
 use super::*;
 use crate::adapters::device::mock::MockLightDevice;
@@ -62,6 +66,62 @@ impl LightDevice for TestLightDevice {
         DeviceHealth {
             connected: state.connected,
             device_name: Some("test-device".into()),
+            last_error: None,
+            last_write_at: None,
+            last_mode: state.writes.last().copied(),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct HangingDeviceState {
+    connected: bool,
+    writes: Vec<Mode>,
+}
+
+/// 用来模拟“底层 BLE future 一直不返回”的设备。
+///
+/// 真实线上问题不是普通错误返回，而是某次底层调用长时间挂住，
+/// 导致 daemon 看起来像是失联或退出。
+/// 这个测试设备专门把 `write_mode` 卡住，验证 daemon 侧的超时与缓存逻辑。
+struct HangingWriteDevice {
+    state: Arc<Mutex<HangingDeviceState>>,
+    write_started_tx: Mutex<Option<oneshot::Sender<()>>>,
+}
+
+#[async_trait]
+impl LightDevice for HangingWriteDevice {
+    async fn connect(&mut self) -> AppResult<DeviceInfo> {
+        let mut state = self.state.lock().await;
+        state.connected = true;
+        Ok(DeviceInfo {
+            name: "hanging-device".into(),
+            id: "hanging".into(),
+        })
+    }
+
+    async fn write_mode(&mut self, mode: Mode) -> AppResult<()> {
+        {
+            let mut state = self.state.lock().await;
+            state.writes.push(mode);
+        }
+        if let Some(sender) = self.write_started_tx.lock().await.take() {
+            let _ = sender.send(());
+        }
+        std::future::pending::<()>().await;
+        Ok(())
+    }
+
+    async fn read_mode(&mut self) -> AppResult<Option<Mode>> {
+        let state = self.state.lock().await;
+        Ok(state.writes.last().copied())
+    }
+
+    async fn health(&self) -> DeviceHealth {
+        let state = self.state.lock().await;
+        DeviceHealth {
+            connected: state.connected,
+            device_name: Some("hanging-device".into()),
             last_error: None,
             last_write_at: None,
             last_mode: state.writes.last().copied(),
@@ -156,6 +216,20 @@ fn build_daemon(device_state: Arc<Mutex<DeviceState>>) -> Arc<Daemon> {
         Arc::new(TestEventLog),
         Box::new(TestLightDevice {
             state: device_state,
+        }),
+    )
+}
+
+fn build_hanging_write_daemon(
+    device_state: Arc<Mutex<HangingDeviceState>>,
+    write_started_tx: oneshot::Sender<()>,
+) -> Arc<Daemon> {
+    Daemon::new(
+        Arc::new(TestRuntimeStore),
+        Arc::new(TestEventLog),
+        Box::new(HangingWriteDevice {
+            state: device_state,
+            write_started_tx: Mutex::new(Some(write_started_tx)),
         }),
     )
 }
@@ -355,6 +429,89 @@ async fn startup_lock_can_be_acquired_inside_tokio_runtime() {
     assert!(!runtime.runtime_dir().join("daemon.lock").exists());
 
     let _ = std::fs::remove_dir_all(runtime_root);
+}
+
+#[tokio::test]
+async fn handle_send_times_out_when_ble_write_hangs() {
+    let device_state = Arc::new(Mutex::new(HangingDeviceState::default()));
+    let (write_started_tx, _write_started_rx) = oneshot::channel();
+    let daemon = build_hanging_write_daemon(device_state.clone(), write_started_tx);
+
+    daemon
+        .try_connect_device()
+        .await
+        .expect("connect should initialize cached device health");
+
+    let started = std::time::Instant::now();
+    let response = daemon.handle_send("hang-1", send_payload(Mode::Busy)).await;
+
+    assert!(
+        started.elapsed() < Duration::from_millis(400),
+        "BLE write timeout should return promptly in tests"
+    );
+    assert!(!response.ok);
+    assert_eq!(response.code.as_deref(), Some("ble_write_timeout"));
+    assert_eq!(
+        response.data.as_ref().and_then(|data| data.get("accepted")),
+        Some(&json!(true))
+    );
+    assert_eq!(
+        response.data.as_ref().and_then(|data| data.get("queued")),
+        Some(&json!(true))
+    );
+
+    let status = daemon.handle_status("hang-status", true).await;
+    let status_json = status.data.expect("status should contain data");
+    assert_eq!(status_json["effective"], json!("busy"));
+    assert_eq!(status_json["ble"], json!("disconnected"));
+
+    let state = device_state.lock().await;
+    assert_eq!(state.writes, vec![Mode::Busy]);
+}
+
+#[tokio::test]
+async fn status_remains_responsive_while_ble_write_is_stuck() {
+    let device_state = Arc::new(Mutex::new(HangingDeviceState::default()));
+    let (write_started_tx, write_started_rx) = oneshot::channel();
+    let daemon = build_hanging_write_daemon(device_state, write_started_tx);
+
+    daemon
+        .try_connect_device()
+        .await
+        .expect("connect should initialize cached device health");
+
+    let send_daemon = daemon.clone();
+    let send_task = tokio::spawn(async move {
+        send_daemon
+            .handle_send("hang-2", send_payload(Mode::Ai))
+            .await
+    });
+
+    write_started_rx
+        .await
+        .expect("write should begin before probing status");
+    yield_now().await;
+    sleep(Duration::from_millis(5)).await;
+
+    let status = timeout(
+        Duration::from_millis(40),
+        daemon.handle_status("hang-status-live", true),
+    )
+    .await
+    .expect("status should not block on the device mutex while BLE write is hung");
+
+    assert!(status.ok);
+    let status_json = status.data.expect("status should contain data");
+    assert_eq!(status_json["effective"], json!("ai"));
+    assert_eq!(status_json["ble"], json!("connected"));
+
+    let send_response = send_task.await.expect("send task should complete");
+    assert!(!send_response.ok);
+    assert_eq!(send_response.code.as_deref(), Some("ble_write_timeout"));
+
+    let final_status = daemon.handle_status("hang-status-final", true).await;
+    let final_status_json = final_status.data.expect("final status should contain data");
+    assert_eq!(final_status_json["ble"], json!("disconnected"));
 }
 
 fn build_hook_request(

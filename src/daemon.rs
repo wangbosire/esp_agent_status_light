@@ -8,7 +8,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use serde_json::json;
 use tokio::sync::{Mutex, watch};
-use tokio::time::{Duration, sleep};
+use tokio::time::{Duration, sleep, timeout};
 
 use crate::model::{
     AppError, AppResult, DeviceHealth, IpcRequestEnvelope, IpcRequestPayload, IpcResponseEnvelope,
@@ -20,6 +20,21 @@ use crate::ports::log::EventLog;
 use crate::ports::runtime::RuntimeStore;
 use crate::router::StateRouter;
 use crate::runtime_lock::FileLock;
+
+#[cfg(test)]
+const DEVICE_HEALTH_TIMEOUT: Duration = Duration::from_millis(20);
+#[cfg(not(test))]
+const DEVICE_HEALTH_TIMEOUT: Duration = Duration::from_millis(500);
+
+#[cfg(test)]
+const DEVICE_CONNECT_TIMEOUT: Duration = Duration::from_millis(80);
+#[cfg(not(test))]
+const DEVICE_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+
+#[cfg(test)]
+const DEVICE_WRITE_TIMEOUT: Duration = Duration::from_millis(80);
+#[cfg(not(test))]
+const DEVICE_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// daemon 是唯一持有 LightDevice 的进程。
 /// 所有 Hook 事件都要先经过 IPC 进入这里，再由这里统一做优先级路由和 BLE 写入。
@@ -34,6 +49,11 @@ pub struct Daemon {
     log: Arc<dyn EventLog>,
     /// 用于后台任务和 server 协调退出。
     shutdown_tx: watch::Sender<bool>,
+    /// 设备健康快照缓存。
+    ///
+    /// 这份缓存让 `status`、重连判断和日志可以在不抢占设备互斥锁的前提下
+    /// 继续工作；即使某次底层 BLE 写入卡住，daemon 仍能对外报告“我当前卡在什么状态”。
+    device_health: Mutex<DeviceHealth>,
     /// 最近一次成功写 BLE 的时间，提供给 `status --verbose`。
     last_ble_write_at: Mutex<Option<chrono::DateTime<chrono::Utc>>>,
     /// 最近一次真正写到设备上的模式，用于去重和重连补写。
@@ -61,6 +81,7 @@ impl Daemon {
             runtime,
             log,
             shutdown_tx,
+            device_health: Mutex::new(DeviceHealth::default()),
             last_ble_write_at: Mutex::new(None),
             last_applied_mode: Mutex::new(None),
             startup_lock: Mutex::new(None),
@@ -183,10 +204,7 @@ impl Daemon {
                     }
                 }
                 _ = sleep(Duration::from_secs(backoff[index])) => {
-                    let health = {
-                        let device = self.device.lock().await;
-                        device.health().await
-                    };
+                    let health = self.cached_device_health().await;
                     if health.connected {
                         index = 0;
                         continue;
@@ -224,8 +242,14 @@ impl Daemon {
             context: None,
         });
         let mut device = self.device.lock().await;
-        match device.connect().await {
-            Ok(_) => {
+        match timeout(DEVICE_CONNECT_TIMEOUT, device.connect()).await {
+            Ok(Ok(info)) => {
+                self.update_cached_device_health(|health| {
+                    health.connected = true;
+                    health.device_name = Some(info.name.clone());
+                    health.last_error = None;
+                })
+                .await;
                 self.append_runtime_log(RuntimeLogEvent {
                     kind: "runtime_ble",
                     phase: "ble.connect_success",
@@ -238,7 +262,12 @@ impl Daemon {
                 });
                 Ok(())
             }
-            Err(err) => {
+            Ok(Err(err)) => {
+                self.update_cached_device_health(|health| {
+                    health.connected = false;
+                    health.last_error = Some(format!("{}: {}", err.code, err.message));
+                })
+                .await;
                 self.append_runtime_log(RuntimeLogEvent {
                     kind: "runtime_ble",
                     phase: "ble.connect_failed",
@@ -250,6 +279,30 @@ impl Daemon {
                     context: Some(json!({
                         "error_code": err.code,
                         "error_message": err.message,
+                    })),
+                });
+                Err(err)
+            }
+            Err(_) => {
+                self.update_cached_device_health(|health| {
+                    health.connected = false;
+                    health.last_error =
+                        Some("ble_connect_timeout: device connect timed out".into());
+                })
+                .await;
+                let err = AppError::new("ble_connect_timeout", "device connect timed out");
+                self.append_runtime_log(RuntimeLogEvent {
+                    kind: "runtime_ble",
+                    phase: "ble.connect_failed",
+                    message: "device connect timed out",
+                    code: Some(&err.code),
+                    source: None,
+                    session: None,
+                    mode: None,
+                    context: Some(json!({
+                        "error_code": err.code,
+                        "error_message": err.message,
+                        "timeout_ms": DEVICE_CONNECT_TIMEOUT.as_millis(),
                     })),
                 });
                 Err(err)
@@ -281,7 +334,28 @@ impl Daemon {
         });
 
         let mut device = self.device.lock().await;
-        let health = device.health().await;
+        let health = match timeout(DEVICE_HEALTH_TIMEOUT, device.health()).await {
+            Ok(health) => {
+                self.replace_cached_device_health(health.clone()).await;
+                health
+            }
+            Err(_) => {
+                self.append_runtime_log(RuntimeLogEvent {
+                    kind: "runtime_ble",
+                    phase: "ble.health_timeout",
+                    message: "device health probe timed out before write",
+                    code: Some("ble_health_timeout"),
+                    source: None,
+                    session: None,
+                    mode: Some(effective),
+                    context: Some(json!({
+                        "effective": effective,
+                        "timeout_ms": DEVICE_HEALTH_TIMEOUT.as_millis(),
+                    })),
+                });
+                self.cached_device_health().await
+            }
+        };
         if !health.connected {
             self.append_runtime_log(RuntimeLogEvent {
                 kind: "runtime_ble",
@@ -295,7 +369,36 @@ impl Daemon {
                     "effective": effective,
                 })),
             });
-            device.connect().await?;
+            match timeout(DEVICE_CONNECT_TIMEOUT, device.connect()).await {
+                Ok(Ok(info)) => {
+                    self.update_cached_device_health(|cached| {
+                        cached.connected = true;
+                        cached.device_name = Some(info.name.clone());
+                        cached.last_error = None;
+                    })
+                    .await;
+                }
+                Ok(Err(err)) => {
+                    self.update_cached_device_health(|cached| {
+                        cached.connected = false;
+                        cached.last_error = Some(format!("{}: {}", err.code, err.message));
+                    })
+                    .await;
+                    return Err(err);
+                }
+                Err(_) => {
+                    self.update_cached_device_health(|cached| {
+                        cached.connected = false;
+                        cached.last_error =
+                            Some("ble_connect_timeout: reconnect before write timed out".into());
+                    })
+                    .await;
+                    return Err(AppError::new(
+                        "ble_connect_timeout",
+                        "reconnect before write timed out",
+                    ));
+                }
+            }
         }
 
         // BLE 写入要做节流：只有 effective mode 真正变化时才写设备。
@@ -318,9 +421,36 @@ impl Daemon {
             return Ok(());
         }
 
-        device.write_mode(effective).await?;
+        match timeout(DEVICE_WRITE_TIMEOUT, device.write_mode(effective)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                self.update_cached_device_health(|health| {
+                    health.connected = false;
+                    health.last_error = Some(format!("{}: {}", err.code, err.message));
+                })
+                .await;
+                return Err(err);
+            }
+            Err(_) => {
+                self.update_cached_device_health(|health| {
+                    health.connected = false;
+                    health.last_error = Some("ble_write_timeout: device write timed out".into());
+                })
+                .await;
+                return Err(AppError::new("ble_write_timeout", "device write timed out"));
+            }
+        }
+
         *last_applied = Some(effective);
-        *self.last_ble_write_at.lock().await = Some(Utc::now());
+        let now = Utc::now();
+        *self.last_ble_write_at.lock().await = Some(now);
+        self.update_cached_device_health(|health| {
+            health.connected = true;
+            health.last_error = None;
+            health.last_mode = Some(effective);
+            health.last_write_at = Some(now);
+        })
+        .await;
         self.append_runtime_log(RuntimeLogEvent {
             kind: "runtime_ble",
             phase: "ble.write_success",
@@ -494,10 +624,7 @@ impl Daemon {
             let mut router = self.router.lock().await;
             router.snapshot_status(now, verbose)
         };
-        let health: DeviceHealth = {
-            let device = self.device.lock().await;
-            device.health().await
-        };
+        let health = self.cached_device_health().await;
 
         let response = StatusResponse {
             daemon: "running".into(),
@@ -554,6 +681,19 @@ impl Daemon {
         let mut guard = self.startup_lock.lock().await;
         let _ = guard.take();
         Ok(())
+    }
+
+    async fn cached_device_health(&self) -> DeviceHealth {
+        self.device_health.lock().await.clone()
+    }
+
+    async fn replace_cached_device_health(&self, health: DeviceHealth) {
+        *self.device_health.lock().await = health;
+    }
+
+    async fn update_cached_device_health(&self, update: impl FnOnce(&mut DeviceHealth)) {
+        let mut health = self.device_health.lock().await;
+        update(&mut health);
     }
 }
 

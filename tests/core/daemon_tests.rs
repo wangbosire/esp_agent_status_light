@@ -19,6 +19,7 @@ use crate::adapters::device::mock::MockLightDevice;
 use crate::adapters::log::jsonl::JsonlLogAdapter;
 use crate::adapters::runtime::fs::FsRuntimeAdapter;
 use crate::model::{AppError, DeviceInfo, EventSemantics, InstallManifest, IpcInfo};
+use crate::ports::ipc::{IpcRequestHandler, IpcServer};
 use crate::ports::log::EventLog;
 use crate::ports::runtime::RuntimeStore;
 use crate::ports::source::SourceAdapterRegistry;
@@ -126,6 +127,84 @@ impl LightDevice for HangingWriteDevice {
             last_write_at: None,
             last_mode: state.writes.last().copied(),
         }
+    }
+}
+
+#[derive(Debug, Default)]
+struct SlowConnectDeviceState {
+    connect_calls: usize,
+}
+
+struct SlowConnectDevice {
+    state: Arc<Mutex<SlowConnectDeviceState>>,
+    connect_started_tx: Mutex<Option<oneshot::Sender<()>>>,
+}
+
+#[async_trait]
+impl LightDevice for SlowConnectDevice {
+    async fn connect(&mut self) -> AppResult<DeviceInfo> {
+        {
+            let mut state = self.state.lock().await;
+            state.connect_calls += 1;
+        }
+        if let Some(sender) = self.connect_started_tx.lock().await.take() {
+            let _ = sender.send(());
+        }
+        sleep(Duration::from_millis(150)).await;
+        Ok(DeviceInfo {
+            name: "slow-connect-device".into(),
+            id: "slow-connect".into(),
+        })
+    }
+
+    async fn write_mode(&mut self, _mode: Mode) -> AppResult<()> {
+        Ok(())
+    }
+
+    async fn read_mode(&mut self) -> AppResult<Option<Mode>> {
+        Ok(None)
+    }
+
+    async fn health(&self) -> DeviceHealth {
+        DeviceHealth {
+            connected: false,
+            device_name: Some("slow-connect-device".into()),
+            last_error: None,
+            last_write_at: None,
+            last_mode: None,
+        }
+    }
+}
+
+struct ReadySignalServer {
+    serve_started_tx: Mutex<Option<oneshot::Sender<()>>>,
+}
+
+#[async_trait]
+impl IpcServer for ReadySignalServer {
+    fn info(&self) -> IpcInfo {
+        IpcInfo {
+            kind: "test".into(),
+            address: "ready-signal".into(),
+            version: 1,
+            started_at: Utc::now(),
+        }
+    }
+
+    async fn serve(
+        &self,
+        _handler: Arc<dyn IpcRequestHandler>,
+        mut shutdown: tokio::sync::watch::Receiver<bool>,
+    ) -> AppResult<()> {
+        if let Some(sender) = self.serve_started_tx.lock().await.take() {
+            let _ = sender.send(());
+        }
+        while shutdown.changed().await.is_ok() {
+            if *shutdown.borrow() {
+                break;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -251,8 +330,17 @@ fn send_payload(mode: Mode) -> SendPayload {
     }
 }
 
+async fn wait_for_writes(state: &Arc<Mutex<DeviceState>>, expected_len: usize) {
+    for _ in 0..20 {
+        if state.lock().await.writes.len() >= expected_len {
+            return;
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+}
+
 #[tokio::test]
-async fn handle_send_returns_error_when_ble_write_fails() {
+async fn handle_send_accepts_even_when_ble_write_fails_later() {
     let device_state = Arc::new(Mutex::new(DeviceState {
         connected: true,
         writes: Vec::new(),
@@ -262,15 +350,24 @@ async fn handle_send_returns_error_when_ble_write_fails() {
 
     let response = daemon.handle_send("req-1", send_payload(Mode::Busy)).await;
 
-    assert!(!response.ok);
-    assert_eq!(response.code.as_deref(), Some("ble_write_failed"));
-    assert_eq!(
-        response.data.as_ref().and_then(|data| data.get("accepted")),
-        Some(&json!(true))
-    );
+    assert!(response.ok);
     assert_eq!(
         response.data.as_ref().and_then(|data| data.get("queued")),
         Some(&json!(true))
+    );
+
+    for _ in 0..10 {
+        if daemon.cached_device_health().await.last_error.is_some() {
+            break;
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+    let health = daemon.cached_device_health().await;
+    assert!(
+        health
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("ble_write_failed"))
     );
 }
 
@@ -285,6 +382,7 @@ async fn sync_effective_mode_force_write_reapplies_same_mode() {
 
     let response = daemon.handle_send("req-2", send_payload(Mode::Ai)).await;
     assert!(response.ok);
+    wait_for_writes(&device_state, 1).await;
 
     daemon
         .sync_effective_mode(true)
@@ -385,6 +483,7 @@ async fn hook_state_flow_uses_latest_state_within_same_session() {
     };
     let response = daemon.handle_send("flow-4", new_round_thinking).await;
     assert!(response.ok);
+    wait_for_writes(&device_state, 1).await;
 
     let status = daemon.handle_status("status-3", true).await;
     let status_json = status.data.expect("status should contain data");
@@ -392,10 +491,7 @@ async fn hook_state_flow_uses_latest_state_within_same_session() {
     assert_eq!(status_json["sources"][0]["turn"], json!("turn-2"));
 
     let state = device_state.lock().await;
-    assert_eq!(
-        state.writes,
-        vec![Mode::Busy, Mode::Error, Mode::Success, Mode::Thinking]
-    );
+    assert_eq!(state.writes.last(), Some(&Mode::Thinking));
 }
 
 fn temp_runtime_root(name: &str) -> PathBuf {
@@ -432,9 +528,9 @@ async fn startup_lock_can_be_acquired_inside_tokio_runtime() {
 }
 
 #[tokio::test]
-async fn handle_send_times_out_when_ble_write_hangs() {
+async fn handle_send_returns_before_hanging_ble_write_finishes() {
     let device_state = Arc::new(Mutex::new(HangingDeviceState::default()));
-    let (write_started_tx, _write_started_rx) = oneshot::channel();
+    let (write_started_tx, write_started_rx) = oneshot::channel();
     let daemon = build_hanging_write_daemon(device_state.clone(), write_started_tx);
 
     daemon
@@ -446,24 +542,23 @@ async fn handle_send_times_out_when_ble_write_hangs() {
     let response = daemon.handle_send("hang-1", send_payload(Mode::Busy)).await;
 
     assert!(
-        started.elapsed() < Duration::from_millis(400),
-        "BLE write timeout should return promptly in tests"
+        started.elapsed() < Duration::from_millis(40),
+        "send should return before waiting on the slow BLE write path"
     );
-    assert!(!response.ok);
-    assert_eq!(response.code.as_deref(), Some("ble_write_timeout"));
-    assert_eq!(
-        response.data.as_ref().and_then(|data| data.get("accepted")),
-        Some(&json!(true))
-    );
+    assert!(response.ok);
     assert_eq!(
         response.data.as_ref().and_then(|data| data.get("queued")),
         Some(&json!(true))
     );
 
+    write_started_rx
+        .await
+        .expect("background BLE write should still be attempted");
+
     let status = daemon.handle_status("hang-status", true).await;
     let status_json = status.data.expect("status should contain data");
     assert_eq!(status_json["effective"], json!("busy"));
-    assert_eq!(status_json["ble"], json!("disconnected"));
+    assert_eq!(status_json["ble"], json!("connected"));
 
     let state = device_state.lock().await;
     assert_eq!(state.writes, vec![Mode::Busy]);
@@ -481,11 +576,10 @@ async fn status_remains_responsive_while_ble_write_is_stuck() {
         .expect("connect should initialize cached device health");
 
     let send_daemon = daemon.clone();
-    let send_task = tokio::spawn(async move {
-        send_daemon
-            .handle_send("hang-2", send_payload(Mode::Ai))
-            .await
-    });
+    let send_response = send_daemon
+        .handle_send("hang-2", send_payload(Mode::Ai))
+        .await;
+    assert!(send_response.ok);
 
     write_started_rx
         .await
@@ -505,13 +599,69 @@ async fn status_remains_responsive_while_ble_write_is_stuck() {
     assert_eq!(status_json["effective"], json!("ai"));
     assert_eq!(status_json["ble"], json!("connected"));
 
-    let send_response = send_task.await.expect("send task should complete");
-    assert!(!send_response.ok);
-    assert_eq!(send_response.code.as_deref(), Some("ble_write_timeout"));
+    let still_responsive = timeout(
+        Duration::from_millis(40),
+        daemon.handle_status("hang-status-final", true),
+    )
+    .await
+    .expect("status should remain responsive while background BLE write is hung");
+    assert!(still_responsive.ok);
+}
 
-    let final_status = daemon.handle_status("hang-status-final", true).await;
-    let final_status_json = final_status.data.expect("final status should contain data");
-    assert_eq!(final_status_json["ble"], json!("disconnected"));
+#[tokio::test]
+async fn daemon_status_is_ready_while_initial_connect_is_still_running() {
+    let runtime_root = temp_runtime_root("slow-connect-startup");
+    let runtime: Arc<dyn RuntimeStore> = Arc::new(FsRuntimeAdapter::new(runtime_root.clone()));
+    let device_state = Arc::new(Mutex::new(SlowConnectDeviceState::default()));
+    let (connect_started_tx, connect_started_rx) = oneshot::channel();
+    let daemon = Daemon::new(
+        runtime.clone(),
+        Arc::new(TestEventLog),
+        Box::new(SlowConnectDevice {
+            state: device_state.clone(),
+            connect_started_tx: Mutex::new(Some(connect_started_tx)),
+        }),
+    );
+    let (serve_started_tx, serve_started_rx) = oneshot::channel();
+    let server = Arc::new(ReadySignalServer {
+        serve_started_tx: Mutex::new(Some(serve_started_tx)),
+    });
+    let daemon_for_server = daemon.clone();
+
+    let serve_task = tokio::spawn(async move { daemon_for_server.run(server.clone()).await });
+
+    serve_started_rx
+        .await
+        .expect("server should start before probing status");
+    connect_started_rx
+        .await
+        .expect("initial connect should start in background");
+
+    let status = timeout(
+        Duration::from_millis(80),
+        daemon.handle_status("slow-start-status", false),
+    )
+    .await
+    .expect("status should be available before initial connect finishes");
+
+    assert!(status.ok);
+    let data = status.data.expect("status should contain data");
+    assert_eq!(data["daemon"], json!("running"));
+    assert_eq!(data["ble"], json!("disconnected"));
+
+    let state = device_state.lock().await;
+    assert_eq!(state.connect_calls, 1);
+    drop(state);
+
+    let stop = daemon.handle(IpcRequestEnvelope::new(IpcRequestPayload::Stop)).await;
+    assert!(stop.ok);
+
+    serve_task
+        .await
+        .expect("daemon task should join")
+        .expect("daemon should stop cleanly");
+
+    let _ = std::fs::remove_dir_all(runtime_root);
 }
 
 fn build_hook_request(

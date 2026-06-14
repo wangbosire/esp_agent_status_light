@@ -3,7 +3,7 @@
 //! 这个模块负责把来自 Hook 的 IPC 请求变成稳定的内部状态，并且作为唯一持有
 //! `LightDevice` 的进程，统一管理 BLE 连接、重连、TTL 过期和日志记录。
 
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use chrono::Utc;
 use serde_json::json;
@@ -60,6 +60,8 @@ pub struct Daemon {
     last_applied_mode: Mutex<Option<Mode>>,
     /// 进程级启动锁，避免并发 spawn 出多个 daemon。
     startup_lock: Mutex<Option<FileLock>>,
+    /// 允许 `&self` 路径安全升级回 `Arc<Self>`，用于后台任务派发。
+    self_ref: Weak<Daemon>,
 }
 
 impl Daemon {
@@ -75,7 +77,7 @@ impl Daemon {
         // daemon 以 `Arc<Self>` 形式返回，便于同时交给 IPC server、
         // 过期清理任务和重连任务共享。
         let (shutdown_tx, _) = watch::channel(false);
-        Arc::new(Self {
+        Arc::new_cyclic(|self_ref| Self {
             router: Mutex::new(StateRouter::new()),
             device: Mutex::new(device),
             runtime,
@@ -85,6 +87,7 @@ impl Daemon {
             last_ble_write_at: Mutex::new(None),
             last_applied_mode: Mutex::new(None),
             startup_lock: Mutex::new(None),
+            self_ref: self_ref.clone(),
         })
     }
 
@@ -109,16 +112,23 @@ impl Daemon {
         self.runtime.write_ipc_info(&server.info())?;
         self.append_log("daemon", "daemon started", None, None, None, None)?;
 
-        if let Err(err) = self.try_connect_device().await {
-            self.append_log(
-                "ble",
-                "initial device connect failed",
-                Some(&err.code),
-                None,
-                None,
-                None,
-            )?;
-        }
+        // 首次 BLE 连接不应阻塞 daemon 对外进入 ready：
+        // 自动拉起链路只依赖 IPC `status` 探活，设备慢连/超时应该由后台重连链路兜底。
+        let initial_connect_task = {
+            let daemon = self.clone();
+            tokio::spawn(async move {
+                if let Err(err) = daemon.try_connect_device().await {
+                    let _ = daemon.append_log(
+                        "ble",
+                        "initial device connect failed",
+                        Some(&err.code),
+                        None,
+                        None,
+                        None,
+                    );
+                }
+            })
+        };
 
         let expiry_task = {
             let daemon = self.clone();
@@ -137,6 +147,8 @@ impl Daemon {
 
         // 一旦 server 退出，无论是正常 stop 还是异常退出，都要通知后台任务收尾。
         let _ = self.shutdown_tx.send(true);
+        initial_connect_task.abort();
+        let _ = initial_connect_task.await;
         let _ = expiry_task.await;
         let _ = reconnect_task.await;
 
@@ -562,38 +574,22 @@ impl Daemon {
             Some(payload.mode),
         );
 
-        if let Err(err) = self.sync_effective_mode(false).await {
-            self.append_runtime_log(RuntimeLogEvent {
-                kind: "runtime_ble",
-                phase: "ble.sync_failed",
-                message: "sync_effective_mode failed",
-                code: Some(&err.code),
-                source: Some(&payload.source),
-                session: Some(&payload.session),
-                mode: Some(effective),
-                context: Some(json!({
-                    "request_id": request_id,
-                    "effective_mode": effective,
-                    "error_code": err.code,
-                    "error_message": err.message,
-                })),
-            });
-            // 路由状态已经接受成功，但 BLE 临时不可用时仍要把“已接受”告诉调用方，
-            // 同时附带明确错误码，供 `--strict` 场景感知失败。
-            let _ = self.append_log(
-                "ble",
-                "failed to sync effective mode",
-                Some(&err.code),
-                Some(&payload.source),
-                Some(&payload.session),
-                Some(effective),
+        let Some(sync_daemon) = self.self_ref.upgrade() else {
+            return IpcResponseEnvelope::error(
+                request_id.to_string(),
+                &AppError::new("daemon_unavailable", "daemon self reference is unavailable"),
             );
-            return IpcResponseEnvelope::error(request_id.to_string(), &err).with_data(json!({
-                "accepted": true,
-                "effective": effective,
-                "queued": true,
-            }));
-        }
+        };
+        let sync_daemon = Arc::new(SendSyncContext {
+            daemon: sync_daemon,
+            request_id: request_id.to_string(),
+            source: payload.source.clone(),
+            session: payload.session.clone(),
+            effective,
+        });
+        tokio::spawn(async move {
+            sync_daemon.run().await;
+        });
 
         self.append_runtime_log(RuntimeLogEvent {
             kind: "runtime_ipc_send",
@@ -611,6 +607,7 @@ impl Daemon {
 
         IpcResponseEnvelope::ok(request_id.to_string(), "accepted").with_data(json!({
             "effective": effective,
+            "queued": true,
         }))
     }
 
@@ -694,6 +691,44 @@ impl Daemon {
     async fn update_cached_device_health(&self, update: impl FnOnce(&mut DeviceHealth)) {
         let mut health = self.device_health.lock().await;
         update(&mut health);
+    }
+}
+
+struct SendSyncContext {
+    daemon: Arc<Daemon>,
+    request_id: String,
+    source: String,
+    session: String,
+    effective: Mode,
+}
+
+impl SendSyncContext {
+    async fn run(&self) {
+        if let Err(err) = self.daemon.sync_effective_mode(false).await {
+            self.daemon.append_runtime_log(RuntimeLogEvent {
+                kind: "runtime_ble",
+                phase: "ble.sync_failed",
+                message: "sync_effective_mode failed",
+                code: Some(&err.code),
+                source: Some(&self.source),
+                session: Some(&self.session),
+                mode: Some(self.effective),
+                context: Some(json!({
+                    "request_id": self.request_id,
+                    "effective_mode": self.effective,
+                    "error_code": err.code,
+                    "error_message": err.message,
+                })),
+            });
+            let _ = self.daemon.append_log(
+                "ble",
+                "failed to sync effective mode",
+                Some(&err.code),
+                Some(&self.source),
+                Some(&self.session),
+                Some(self.effective),
+            );
+        }
     }
 }
 

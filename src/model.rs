@@ -581,7 +581,7 @@ pub enum InstallScope {
     Project(PathBuf),
 }
 
-/// 安装完成后写入 runtime 的清单文件。
+/// 单次安装完成后写入 runtime 的记录项。
 /// 用于用户查看实际落盘位置，也为后续排障预留依据。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstallManifest {
@@ -593,6 +593,18 @@ pub struct InstallManifest {
     pub config_path: String,
     /// Hook 命令最终引用的可执行路径。
     pub command_path: String,
+}
+
+/// 某个 target 对应的安装清单文件。
+///
+/// 同一个 target 可以同时安装到全局和多个项目级配置，因此清单按 `config_path`
+/// 维护多条记录；重复安装同一路径时更新原记录，不叠加重复项。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstallManifestIndex {
+    /// 安装目标名，例如 `codex` / `cursor` / `claude`。
+    pub target: String,
+    /// 当前已知的所有安装记录。
+    pub installations: Vec<InstallManifest>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

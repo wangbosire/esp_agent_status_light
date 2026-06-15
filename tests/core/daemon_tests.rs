@@ -18,7 +18,9 @@ use super::*;
 use crate::adapters::device::mock::MockLightDevice;
 use crate::adapters::log::jsonl::JsonlLogAdapter;
 use crate::adapters::runtime::fs::FsRuntimeAdapter;
-use crate::model::{AppError, DeviceInfo, EventSemantics, InstallManifest, IpcInfo};
+use crate::model::{
+    AppError, DeviceInfo, EventSemantics, InstallManifest, InstallManifestIndex, IpcInfo,
+};
 use crate::ports::ipc::{IpcRequestHandler, IpcServer};
 use crate::ports::log::EventLog;
 use crate::ports::runtime::RuntimeStore;
@@ -344,6 +346,14 @@ impl RuntimeStore for TestRuntimeStore {
 
     fn write_install_manifest(&self, _manifest: &InstallManifest) -> AppResult<()> {
         Ok(())
+    }
+
+    fn remove_install_manifest(&self, _target: &str, _config_path: &str) -> AppResult<()> {
+        Ok(())
+    }
+
+    fn read_install_manifest(&self, _target: &str) -> AppResult<Option<InstallManifestIndex>> {
+        Ok(None)
     }
 }
 

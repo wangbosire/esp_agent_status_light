@@ -418,7 +418,7 @@ classDiagram
 | --- | --- | --- |
 | runtime 根目录 | 平台适配器决定，例如 `~/.esp-agent-status-light` | 统一保存安装清单、稳定二进制、副作用运行文件 |
 | 稳定二进制副本 | `<runtime_root>/bin/esp` 或 `esp.exe` | release / 分发场景下 Hook 实际引用的命令路径 |
-| 安装清单 | `<runtime_root>/config.<target>.json` | 记录最近一次安装的 `target`、`config_path`、`command_path` |
+| 安装清单 | `<runtime_root>/config.<target>.json` | 记录该 `target` 的多条安装记录，按 `config_path` 去重/upsert |
 | daemon 运行信息 | `<runtime_root>/runtime/daemon.pid`、`ipc.json`、`daemon.lock`、`daemon-autostart.lock` | daemon 自恢复、启动串行化、排障与 `status` 查询 |
 | 日志文件 | `<runtime_root>/runtime/events.log`、`runtime.log`、`runtime.lock` | `logs` 读取用户事件；runtime 链路日志用于排查；日志写入通过 token 化文件锁串行化 |
 
@@ -530,7 +530,7 @@ flowchart LR
 - `install` 会先执行一次逻辑级“卸载旧托管条目”，保证重复安装幂等，不会堆叠重复 Hook。
 - `uninstall` 只删除命令中带 `--hook-id agent-status-light` 的托管条目，尽量不碰用户手写 Hook。
 - `install` 和 `uninstall` 都会在覆盖前创建备份文件。
-- `install` 会写入安装清单到 `<runtime_root>/config.<target>.json`；`uninstall` 当前不会主动删除这份安装清单。
+- `install` 会把该 `target` 的安装记录追加/更新到 `<runtime_root>/config.<target>.json`；`uninstall` 会删除对应 `config_path` 的记录，若清空则删除整个清单文件。
 - `install` 在成功写入配置后，会顺手尝试确保 daemon 已启动。
 
 ***

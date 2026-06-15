@@ -6,7 +6,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::model::{AppError, AppResult, InstallManifest, IpcInfo};
+use crate::model::{AppError, AppResult, InstallManifest, InstallManifestIndex, IpcInfo};
 use crate::ports::runtime::RuntimeStore;
 
 #[derive(Debug, Clone)]
@@ -142,8 +142,23 @@ impl RuntimeStore for FsRuntimeAdapter {
     }
 
     fn write_install_manifest(&self, manifest: &InstallManifest) -> AppResult<()> {
-        // install manifest 只记录“这次安装把什么写到了哪里”，不作为运行时真相来源。
-        let raw = serde_json::to_string_pretty(manifest)
+        // install manifest 记录“这个 target 当前已知装到了哪些配置文件”，不作为运行时真相来源。
+        let mut index = self
+            .read_install_manifest(&manifest.target)?
+            .unwrap_or_else(|| InstallManifestIndex {
+                target: manifest.target.clone(),
+                installations: Vec::new(),
+            });
+        if let Some(existing) = index
+            .installations
+            .iter_mut()
+            .find(|item| item.config_path == manifest.config_path)
+        {
+            *existing = manifest.clone();
+        } else {
+            index.installations.push(manifest.clone());
+        }
+        let raw = serde_json::to_string_pretty(&index)
             .map_err(|err| AppError::invalid("serialize install manifest", err))?;
         self.write_atomic(
             self.install_manifest_path(&manifest.target),
@@ -151,6 +166,50 @@ impl RuntimeStore for FsRuntimeAdapter {
             "install manifest",
         )
     }
+
+    fn remove_install_manifest(&self, target: &str, config_path: &str) -> AppResult<()> {
+        let Some(mut index) = self.read_install_manifest(target)? else {
+            return Ok(());
+        };
+        index
+            .installations
+            .retain(|item| item.config_path != config_path);
+
+        let path = self.install_manifest_path(target);
+        if index.installations.is_empty() {
+            if path.exists() {
+                fs::remove_file(path)
+                    .map_err(|err| AppError::io("remove install manifest", err))?;
+            }
+            return Ok(());
+        }
+
+        let raw = serde_json::to_string_pretty(&index)
+            .map_err(|err| AppError::invalid("serialize install manifest", err))?;
+        self.write_atomic(path, raw, "install manifest")
+    }
+
+    fn read_install_manifest(&self, target: &str) -> AppResult<Option<InstallManifestIndex>> {
+        let path = self.install_manifest_path(target);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let raw =
+            fs::read_to_string(path).map_err(|err| AppError::io("read install manifest", err))?;
+        parse_install_manifest_index(target, &raw).map(Some)
+    }
+}
+
+fn parse_install_manifest_index(target: &str, raw: &str) -> AppResult<InstallManifestIndex> {
+    if let Ok(index) = serde_json::from_str::<InstallManifestIndex>(raw) {
+        return Ok(index);
+    }
+    let legacy = serde_json::from_str::<InstallManifest>(raw)
+        .map_err(|err| AppError::invalid("parse install manifest", err))?;
+    Ok(InstallManifestIndex {
+        target: target.into(),
+        installations: vec![legacy],
+    })
 }
 
 /// 在不同平台上尽量稳定地用 `from` 覆盖 `to`。
@@ -168,5 +227,164 @@ fn replace_file(from: &Path, to: &Path, context: &str) -> AppResult<()> {
                 Err(AppError::io(context, rename_err))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+
+    use super::*;
+
+    fn temp_runtime_root(name: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("esp-fs-runtime-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        root
+    }
+
+    fn manifest(target: &str, config_path: &str, command_path: &str) -> InstallManifest {
+        InstallManifest {
+            target: target.into(),
+            installed_at: Utc::now(),
+            config_path: config_path.into(),
+            command_path: command_path.into(),
+        }
+    }
+
+    #[test]
+    fn install_manifest_keeps_multiple_config_paths_per_target() {
+        let root = temp_runtime_root("multi-manifest");
+        let runtime = FsRuntimeAdapter::new(root.clone());
+        runtime.ensure_layout().expect("layout should succeed");
+
+        runtime
+            .write_install_manifest(&manifest(
+                "cursor",
+                "/repo/a/.cursor/hooks.json",
+                "/bin/esp",
+            ))
+            .expect("first manifest write should succeed");
+        runtime
+            .write_install_manifest(&manifest(
+                "cursor",
+                "/repo/b/.cursor/hooks.json",
+                "/bin/esp",
+            ))
+            .expect("second manifest write should succeed");
+
+        let index = runtime
+            .read_install_manifest("cursor")
+            .expect("read manifest should succeed")
+            .expect("manifest should exist");
+        assert_eq!(index.target, "cursor");
+        assert_eq!(index.installations.len(), 2);
+        assert!(
+            index
+                .installations
+                .iter()
+                .any(|item| item.config_path == "/repo/a/.cursor/hooks.json")
+        );
+        assert!(
+            index
+                .installations
+                .iter()
+                .any(|item| item.config_path == "/repo/b/.cursor/hooks.json")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn install_manifest_updates_existing_config_path() {
+        let root = temp_runtime_root("upsert-manifest");
+        let runtime = FsRuntimeAdapter::new(root.clone());
+        runtime.ensure_layout().expect("layout should succeed");
+
+        runtime
+            .write_install_manifest(&manifest("codex", "/repo/.codex/hooks.json", "/old/esp"))
+            .expect("first manifest write should succeed");
+        runtime
+            .write_install_manifest(&manifest("codex", "/repo/.codex/hooks.json", "/new/esp"))
+            .expect("second manifest write should succeed");
+
+        let index = runtime
+            .read_install_manifest("codex")
+            .expect("read manifest should succeed")
+            .expect("manifest should exist");
+        assert_eq!(index.installations.len(), 1);
+        assert_eq!(index.installations[0].command_path, "/new/esp");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remove_install_manifest_deletes_only_matching_config_path() {
+        let root = temp_runtime_root("remove-manifest");
+        let runtime = FsRuntimeAdapter::new(root.clone());
+        runtime.ensure_layout().expect("layout should succeed");
+
+        runtime
+            .write_install_manifest(&manifest(
+                "claude",
+                "/repo/a/.claude/settings.json",
+                "/bin/esp",
+            ))
+            .expect("first manifest write should succeed");
+        runtime
+            .write_install_manifest(&manifest(
+                "claude",
+                "/repo/b/.claude/settings.json",
+                "/bin/esp",
+            ))
+            .expect("second manifest write should succeed");
+
+        runtime
+            .remove_install_manifest("claude", "/repo/a/.claude/settings.json")
+            .expect("remove manifest should succeed");
+        let index = runtime
+            .read_install_manifest("claude")
+            .expect("read manifest should succeed")
+            .expect("manifest should still exist");
+        assert_eq!(index.installations.len(), 1);
+        assert_eq!(
+            index.installations[0].config_path,
+            "/repo/b/.claude/settings.json"
+        );
+
+        runtime
+            .remove_install_manifest("claude", "/repo/b/.claude/settings.json")
+            .expect("remove final manifest should succeed");
+        assert!(
+            runtime
+                .read_install_manifest("claude")
+                .expect("read manifest should succeed")
+                .is_none()
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn read_install_manifest_accepts_legacy_single_record_shape() {
+        let root = temp_runtime_root("legacy-manifest");
+        let runtime = FsRuntimeAdapter::new(root.clone());
+        runtime.ensure_layout().expect("layout should succeed");
+        let legacy = manifest("cursor", "/legacy/.cursor/hooks.json", "/bin/esp");
+        let raw = serde_json::to_string_pretty(&legacy).expect("serialize legacy manifest");
+        fs::write(runtime.install_manifest_path("cursor"), raw).expect("write legacy manifest");
+
+        let index = runtime
+            .read_install_manifest("cursor")
+            .expect("read manifest should succeed")
+            .expect("manifest should exist");
+        assert_eq!(index.target, "cursor");
+        assert_eq!(index.installations.len(), 1);
+        assert_eq!(
+            index.installations[0].config_path,
+            "/legacy/.cursor/hooks.json"
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 }

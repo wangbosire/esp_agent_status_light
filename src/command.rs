@@ -625,12 +625,18 @@ async fn run_install(
     let updated = adapter.install(config, &specs, "agent-status-light", ctx.platform.as_ref())?;
     write_json(&config_path, &updated)?;
 
-    ctx.runtime.write_install_manifest(&InstallManifest {
+    let manifest = InstallManifest {
         target: target.clone(),
         installed_at: Utc::now(),
         config_path: config_path.to_string_lossy().to_string(),
         command_path: install_command.display_command(),
-    })?;
+    };
+    ctx.runtime.write_install_manifest(&manifest)?;
+    let manifest_index = ctx.runtime.read_install_manifest(&target)?;
+    let installation_count = manifest_index
+        .as_ref()
+        .map(|index| index.installations.len())
+        .unwrap_or(0);
 
     let _ = ensure_daemon_running(&ctx).await;
 
@@ -639,6 +645,8 @@ async fn run_install(
         "target": target,
         "config_path": config_path,
         "command_path": install_command.display_command(),
+        "manifest_path": ctx.runtime.install_manifest_path(&manifest.target),
+        "manifest_installations": installation_count,
         "runtime_root": ctx.runtime.runtime_root(),
     })))
 }
@@ -669,10 +677,14 @@ async fn run_uninstall(
         fs::create_dir_all(parent).map_err(|err| AppError::io("create target config dir", err))?;
     }
     write_json(&config_path, &updated)?;
+    let config_path_raw = config_path.to_string_lossy().to_string();
+    ctx.runtime
+        .remove_install_manifest(&target, &config_path_raw)?;
     Ok(CommandOutput::Json(json!({
         "ok": true,
         "target": target,
         "config_path": config_path,
+        "manifest_path": ctx.runtime.install_manifest_path(&target),
     })))
 }
 

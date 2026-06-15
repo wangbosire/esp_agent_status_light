@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use crate::model::{AppResult, InstallManifest, IpcInfo};
+use crate::model::{AppResult, InstallManifest, InstallManifestIndex, IpcInfo};
 
 /// RuntimeStore 把 pid/socket/log/manifest 等运行态文件集中管理，
 /// 这样 daemon 和 command 层都不需要散落拼路径。
@@ -47,4 +47,8 @@ pub trait RuntimeStore: Send + Sync {
     ///
     /// 这不是 Hook 真相来源，而是一个便于用户排查的“安装摘要”。
     fn write_install_manifest(&self, manifest: &InstallManifest) -> AppResult<()>;
+    /// 从安装摘要中移除指定配置路径。
+    fn remove_install_manifest(&self, target: &str, config_path: &str) -> AppResult<()>;
+    /// 读取指定 target 的安装摘要。
+    fn read_install_manifest(&self, target: &str) -> AppResult<Option<InstallManifestIndex>>;
 }

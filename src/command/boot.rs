@@ -1,3 +1,4 @@
+use std::fs;
 use std::time::Duration;
 
 use serde_json::json;
@@ -166,9 +167,12 @@ pub(super) async fn ensure_daemon_running(ctx: &AppContext) -> AppResult<()> {
         );
         // 只要 pid 还在但 IPC 不通，就把它视为 stale marker：
         // 可能是旧 daemon 异常退出，也可能是 pid 文件和 ipc 信息残留了。
-        let _ = ctx.runtime.clear_pid();
-        let _ = ctx.runtime.clear_ipc_info();
+        clear_stale_daemon_runtime_markers(ctx, Some((pid, alive)));
     }
+
+    // 走到这里说明当前没有可用 IPC；即便 pid 文件缺失，也可能还残留 daemon.lock。
+    // 这类锁会让新拉起的 daemon 在进入主循环前直接退出，从而表现为 hook 偶发“触发了但灯不变”。
+    clear_stale_daemon_startup_lock(ctx, None);
 
     let exe = std::env::current_exe().map_err(|err| AppError::io("resolve current exe", err))?;
     append_runtime_log(
@@ -229,6 +233,47 @@ pub(super) async fn ensure_daemon_running(ctx: &AppContext) -> AppResult<()> {
         "ipc_unavailable",
         "daemon did not become ready after auto-start",
     ))
+}
+
+fn clear_stale_daemon_runtime_markers(ctx: &AppContext, stale_pid: Option<(u32, bool)>) {
+    // pid/ipc/daemon.lock 是同一轮 daemon 生命周期的三类标记。
+    // 一旦 pid 已被判定为 stale，必须成组清理，避免只清掉 pid/ipc 后留下启动锁卡死下一轮自启动。
+    let _ = ctx.runtime.clear_pid();
+    let _ = ctx.runtime.clear_ipc_info();
+    clear_stale_daemon_startup_lock(ctx, stale_pid);
+}
+
+fn clear_stale_daemon_startup_lock(ctx: &AppContext, stale_pid: Option<(u32, bool)>) {
+    let lock_path = ctx.runtime.runtime_dir().join("daemon.lock");
+    // 这里只在“确认 IPC 不可用、准备重新 spawn”这条恢复路径上调用。
+    // 因此可以保守地删除 daemon.lock：如果真有健康 daemon 存在，前面的 status RPC 已经提前返回了。
+    let removed = match fs::remove_file(&lock_path) {
+        Ok(()) => true,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => false,
+    };
+
+    if removed {
+        append_runtime_log(
+            ctx.log.as_ref(),
+            RuntimeLogEvent {
+                kind: "runtime_daemon_boot",
+                phase: "daemon_boot.cleared_stale_startup_lock",
+                message: "cleared stale daemon startup lock before spawning daemon",
+                code: None,
+                source: None,
+                session: None,
+                mode: None,
+                context: Some(json!({
+                    "lock_path": lock_path,
+                    "stale_pid": stale_pid.map(|(pid, alive)| json!({
+                        "pid": pid,
+                        "alive": alive,
+                    })),
+                })),
+            },
+        );
+    }
 }
 
 /// 使用统一的 `status` RPC 判断 daemon IPC 是否已经 ready。

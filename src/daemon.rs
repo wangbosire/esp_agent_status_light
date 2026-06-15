@@ -388,6 +388,11 @@ impl Daemon {
                 self.cached_device_health().await
             }
         };
+        // 记录“本轮同步里是否真的做过 reconnect”。
+        // 这样后面的 unchanged 去重才能区分：
+        // - 只是 mode 没变，可以跳过写；
+        // - 虽然 mode 没变，但连接刚重建，仍需要补写一次把设备状态重新对齐。
+        let mut reconnected_before_write = false;
         if !health.connected {
             self.append_runtime_log(RuntimeLogEvent {
                 kind: "runtime_ble",
@@ -403,6 +408,9 @@ impl Daemon {
             });
             match timeout(DEVICE_CONNECT_TIMEOUT, device.connect()).await {
                 Ok(Ok(info)) => {
+                    // 一旦这里发生过 reconnect，后面即使 effective mode 没变化，
+                    // 也不能再把这次写入当成“纯重复”跳过。
+                    reconnected_before_write = true;
                     self.update_cached_device_health(|cached| {
                         cached.connected = true;
                         cached.device_name = Some(info.name.clone());
@@ -448,6 +456,9 @@ impl Daemon {
             });
             match timeout(DEVICE_CONNECT_TIMEOUT, device.connect()).await {
                 Ok(Ok(info)) => {
+                    // idle-stale 路径和 disconnected 路径语义一致：
+                    // reconnect 成功后必须允许后续补写当前 mode。
+                    reconnected_before_write = true;
                     self.update_cached_device_health(|cached| {
                         cached.connected = true;
                         cached.device_name = Some(info.name.clone());
@@ -481,7 +492,11 @@ impl Daemon {
         // BLE 写入要做节流：只有 effective mode 真正变化时才写设备。
         // 但如果设备刚刚重连，即使 mode 没变化，也必须强制补写一次当前 effective mode。
         let mut last_applied = self.last_applied_mode.lock().await;
-        if !force_write && health.connected && last_applied.is_some_and(|mode| mode == effective) {
+        if !force_write
+            && !reconnected_before_write
+            && health.connected
+            && last_applied.is_some_and(|mode| mode == effective)
+        {
             self.append_runtime_log(RuntimeLogEvent {
                 kind: "runtime_ble",
                 phase: "ble.write_skipped_unchanged",
@@ -686,7 +701,7 @@ impl Daemon {
             let mut router = self.router.lock().await;
             router.snapshot_status(now, verbose)
         };
-        let health = self.cached_device_health().await;
+        let health = self.probe_device_health_for_status().await;
 
         let response = StatusResponse {
             daemon: "running".into(),
@@ -747,6 +762,51 @@ impl Daemon {
 
     async fn cached_device_health(&self) -> DeviceHealth {
         self.device_health.lock().await.clone()
+    }
+
+    /// `status` 需要尽量反映当前 BLE 真实状态，因此这里会主动调用一次 device.health()。
+    ///
+    /// 如果底层 BLE 正在执行写入/连接且长时间占用 device 锁，或 health() 自身卡住，
+    /// status 不能跟着无限阻塞；这种情况下把 BLE 视作当前不可响应，并返回 disconnected。
+    async fn probe_device_health_for_status(&self) -> DeviceHealth {
+        match timeout(DEVICE_HEALTH_TIMEOUT, async {
+            // `timeout` 同时包住抢 device 锁和 health 调用：
+            // 如果后台 BLE 写入已经卡住并持有锁，status 也应该快速返回一个“当前不可用”的判断。
+            let device = self.device.lock().await;
+            device.health().await
+        })
+        .await
+        {
+            Ok(health) => {
+                // status 的探测结果同样回写缓存，保证后续无需探测的路径
+                // 也能看到最近一次用户主动查询得到的真实 BLE 状态。
+                self.replace_cached_device_health(health.clone()).await;
+                health
+            }
+            Err(_) => {
+                // 超时在语义上不等于永久断连，但对当前这次 status 来说，
+                // 设备没有在健康检查窗口内响应，因此对外展示为 disconnected 更符合排障直觉。
+                self.update_cached_device_health(|health| {
+                    health.connected = false;
+                    health.last_error =
+                        Some("ble_health_timeout: status health probe timed out".into());
+                })
+                .await;
+                self.append_runtime_log(RuntimeLogEvent {
+                    kind: "runtime_ble",
+                    phase: "ble.status_health_timeout",
+                    message: "status BLE health probe timed out",
+                    code: Some("ble_health_timeout"),
+                    source: None,
+                    session: None,
+                    mode: None,
+                    context: Some(json!({
+                        "timeout_ms": DEVICE_HEALTH_TIMEOUT.as_millis(),
+                    })),
+                });
+                self.cached_device_health().await
+            }
+        }
     }
 
     async fn replace_cached_device_health(&self, health: DeviceHealth) {

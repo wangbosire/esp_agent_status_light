@@ -2,11 +2,11 @@
 //!
 //! 这些测试覆盖 daemon 的状态流转、日志落盘与 Hook 仿真链路。
 
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use std::fs::OpenOptions;
-use std::io::Write;
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -181,6 +181,7 @@ impl LightDevice for SlowConnectDevice {
 #[derive(Debug, Default)]
 struct IdleRefreshDeviceState {
     connect_calls: usize,
+    health_connected: bool,
     writes: Vec<Mode>,
 }
 
@@ -193,6 +194,7 @@ impl LightDevice for IdleRefreshDevice {
     async fn connect(&mut self) -> AppResult<DeviceInfo> {
         let mut state = self.state.lock().await;
         state.connect_calls += 1;
+        state.health_connected = true;
         Ok(DeviceInfo {
             name: "idle-refresh-device".into(),
             id: "idle-refresh".into(),
@@ -213,7 +215,7 @@ impl LightDevice for IdleRefreshDevice {
     async fn health(&self) -> DeviceHealth {
         let state = self.state.lock().await;
         DeviceHealth {
-            connected: state.connect_calls > 0,
+            connected: state.health_connected,
             device_name: Some("idle-refresh-device".into()),
             last_error: None,
             last_write_at: None,
@@ -606,7 +608,7 @@ async fn handle_send_returns_before_hanging_ble_write_finishes() {
     let status = daemon.handle_status("hang-status", true).await;
     let status_json = status.data.expect("status should contain data");
     assert_eq!(status_json["effective"], json!("busy"));
-    assert_eq!(status_json["ble"], json!("connected"));
+    assert_eq!(status_json["ble"], json!("disconnected"));
 
     let state = device_state.lock().await;
     assert_eq!(state.writes, vec![Mode::Busy]);
@@ -645,7 +647,7 @@ async fn status_remains_responsive_while_ble_write_is_stuck() {
     assert!(status.ok);
     let status_json = status.data.expect("status should contain data");
     assert_eq!(status_json["effective"], json!("ai"));
-    assert_eq!(status_json["ble"], json!("connected"));
+    assert_eq!(status_json["ble"], json!("disconnected"));
 
     let still_responsive = timeout(
         Duration::from_millis(40),
@@ -654,6 +656,30 @@ async fn status_remains_responsive_while_ble_write_is_stuck() {
     .await
     .expect("status should remain responsive while background BLE write is hung");
     assert!(still_responsive.ok);
+}
+
+#[tokio::test]
+async fn status_reports_live_ble_health_instead_of_cached_snapshot() {
+    let device_state = Arc::new(Mutex::new(DeviceState {
+        connected: false,
+        writes: Vec::new(),
+        fail_write: false,
+    }));
+    let daemon = build_daemon(device_state.clone());
+
+    daemon
+        .try_connect_device()
+        .await
+        .expect("connect should initialize cached connected state");
+    {
+        let mut state = device_state.lock().await;
+        state.connected = false;
+    }
+
+    let status = daemon.handle_status("live-health", false).await;
+    assert!(status.ok);
+    let status_json = status.data.expect("status should contain data");
+    assert_eq!(status_json["ble"], json!("disconnected"));
 }
 
 #[tokio::test]
@@ -701,7 +727,9 @@ async fn daemon_status_is_ready_while_initial_connect_is_still_running() {
     assert_eq!(state.connect_calls, 1);
     drop(state);
 
-    let stop = daemon.handle(IpcRequestEnvelope::new(IpcRequestPayload::Stop)).await;
+    let stop = daemon
+        .handle(IpcRequestEnvelope::new(IpcRequestPayload::Stop))
+        .await;
     assert!(stop.ok);
 
     serve_task
@@ -733,6 +761,7 @@ async fn idle_connection_refreshes_before_next_write() {
     {
         let mut state = device_state.lock().await;
         state.connect_calls = 0;
+        state.health_connected = true;
     }
     {
         let mut last = daemon.last_ble_write_at.lock().await;
@@ -757,8 +786,7 @@ async fn idle_connection_refreshes_before_next_write() {
 async fn daemon_autostart_lock_waits_long_enough_for_existing_owner() {
     let runtime_root = temp_runtime_root("autostart-lock-wait");
     let lock_path = runtime_root.join("runtime").join("daemon-autostart.lock");
-    std::fs::create_dir_all(lock_path.parent().expect("runtime dir"))
-        .expect("create runtime dir");
+    std::fs::create_dir_all(lock_path.parent().expect("runtime dir")).expect("create runtime dir");
 
     let holder = std::thread::spawn({
         let lock_path = lock_path.clone();

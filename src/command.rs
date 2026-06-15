@@ -54,12 +54,26 @@ pub enum CommandOutput {
 /// 1. 让命令分发层到实现层的边界更清晰；
 /// 2. 后续扩展 `send` 选项时，不必持续膨胀函数签名。
 struct SendCommandArgs {
+    /// CLI 上显式传入的 mode。
+    /// 对手动调用来说通常就是最终模式；对 Hook 调用来说，它只是 source adapter 无法识别事件时的兜底值。
     explicit_mode: Mode,
+    /// 事件来源名，例如 `manual` / `codex` / `cursor` / `claude`。
+    /// 命令层用它选择对应的 SourceAdapter，并最终写入 SendPayload 供 daemon 路由。
     source: String,
+    /// CLI 上传入的 session 参数。
+    /// 值为 `auto` 时，后续会替换成 SourceAdapter 从 Hook stdin 中解析出的真实 session。
     session: String,
+    /// 显式覆盖状态存活时间，单位秒。
+    /// 为空时由 router 使用 mode 默认 TTL，避免每个 source adapter 自己决定过期策略。
     ttl: Option<u64>,
+    /// Hook 静默模式。
+    /// 非 strict 失败时不输出 warning，保证灯效链路不会打扰宿主 Agent 主流程。
     quiet: bool,
+    /// 严格失败模式。
+    /// 只有开启后，send/IPC/BLE 链路错误才会以非零退出码返回给调用方。
     strict: bool,
+    /// 安装器写入的稳定 Hook 标识。
+    /// daemon 会把它记录进 payload/log，安装与卸载也依赖同一标识做去重和匹配。
     hook_id: String,
 }
 

@@ -2,8 +2,6 @@
 //!
 //! 这些测试覆盖 daemon 的状态流转、日志落盘与 Hook 仿真链路。
 
-use std::fs::OpenOptions;
-use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -201,6 +199,54 @@ impl LightDevice for IdleRefreshDevice {
             last_error: None,
             last_write_at: None,
             last_mode: state.writes.last().copied(),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct RefreshBeforeWriteDeviceState {
+    health_calls: usize,
+    writes: Vec<Mode>,
+}
+
+struct RefreshBeforeWriteDevice {
+    state: Arc<Mutex<RefreshBeforeWriteDeviceState>>,
+    health_started_tx: Mutex<Option<oneshot::Sender<()>>>,
+    allow_health_return_rx: Mutex<Option<oneshot::Receiver<()>>>,
+}
+
+#[async_trait]
+impl LightDevice for RefreshBeforeWriteDevice {
+    async fn connect(&mut self) -> AppResult<DeviceInfo> {
+        Ok(DeviceInfo {
+            name: "refresh-before-write-device".into(),
+            id: "refresh-before-write".into(),
+        })
+    }
+
+    async fn write_mode(&mut self, mode: Mode) -> AppResult<()> {
+        let mut state = self.state.lock().await;
+        state.writes.push(mode);
+        Ok(())
+    }
+
+    async fn health(&self) -> DeviceHealth {
+        {
+            let mut state = self.state.lock().await;
+            state.health_calls += 1;
+        }
+        if let Some(sender) = self.health_started_tx.lock().await.take() {
+            let _ = sender.send(());
+        }
+        if let Some(receiver) = self.allow_health_return_rx.lock().await.take() {
+            let _ = receiver.await;
+        }
+        DeviceHealth {
+            connected: true,
+            device_name: Some("refresh-before-write-device".into()),
+            last_error: None,
+            last_write_at: None,
+            last_mode: None,
         }
     }
 }
@@ -425,6 +471,57 @@ async fn sync_effective_mode_force_write_reapplies_same_mode() {
 }
 
 #[tokio::test]
+async fn sync_effective_mode_refreshes_mode_before_ble_write() {
+    let runtime_root = temp_runtime_root("refresh-before-write");
+    let runtime: Arc<dyn RuntimeStore> = Arc::new(FsRuntimeAdapter::new(runtime_root.clone()));
+    runtime.ensure_layout().expect("layout should succeed");
+
+    let device_state = Arc::new(Mutex::new(RefreshBeforeWriteDeviceState::default()));
+    let (health_started_tx, health_started_rx) = oneshot::channel();
+    let (allow_health_return_tx, allow_health_return_rx) = oneshot::channel();
+    let daemon = Daemon::new(
+        runtime.clone(),
+        Arc::new(TestEventLog),
+        Box::new(RefreshBeforeWriteDevice {
+            state: device_state.clone(),
+            health_started_tx: Mutex::new(Some(health_started_tx)),
+            allow_health_return_rx: Mutex::new(Some(allow_health_return_rx)),
+        }),
+    );
+
+    {
+        let mut router = daemon.router.lock().await;
+        router
+            .apply_send(&send_payload(Mode::Busy), Utc::now())
+            .expect("busy should apply");
+    }
+
+    let sync_daemon = daemon.clone();
+    let sync_task = tokio::spawn(async move { sync_daemon.sync_effective_mode(false).await });
+    health_started_rx
+        .await
+        .expect("sync should reach health probe before write");
+
+    {
+        let mut router = daemon.router.lock().await;
+        router
+            .apply_send(&send_payload(Mode::Ai), Utc::now())
+            .expect("ai should apply");
+    }
+
+    let _ = allow_health_return_tx.send(());
+    sync_task
+        .await
+        .expect("sync task should finish")
+        .expect("sync should succeed");
+
+    let state = device_state.lock().await;
+    assert_eq!(state.writes, vec![Mode::Ai]);
+
+    let _ = std::fs::remove_dir_all(runtime_root);
+}
+
+#[tokio::test]
 async fn hook_state_flow_uses_latest_state_within_same_session() {
     let device_state = Arc::new(Mutex::new(DeviceState {
         connected: true,
@@ -556,6 +653,35 @@ async fn startup_lock_can_be_acquired_inside_tokio_runtime() {
     assert!(!runtime.runtime_dir().join("daemon.lock").exists());
 
     let _ = std::fs::remove_dir_all(runtime_root);
+}
+
+#[test]
+fn file_lock_owner_round_trips_json_and_legacy_pid_format() {
+    let root = temp_runtime_root("lock-owner");
+    std::fs::create_dir_all(&root).expect("create temp root");
+
+    let json_lock = root.join("json.lock");
+    let owner = crate::runtime_lock::LockOwner {
+        pid: std::process::id(),
+        token: Some("token-1".into()),
+        start_signature: Some("started".into()),
+    };
+    std::fs::write(
+        &json_lock,
+        serde_json::to_string(&owner).expect("serialize lock owner"),
+    )
+    .expect("write json lock");
+
+    let parsed = crate::runtime_lock::read_lock_owner(&json_lock).expect("parse json lock");
+    assert_eq!(parsed, owner);
+
+    let legacy_lock = root.join("legacy.lock");
+    std::fs::write(&legacy_lock, format!("{}\n", std::process::id())).expect("write legacy lock");
+    let parsed_legacy = crate::runtime_lock::read_lock_owner(&legacy_lock).expect("parse legacy");
+    assert_eq!(parsed_legacy.pid, std::process::id());
+    assert!(parsed_legacy.token.is_none());
+
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]
@@ -768,22 +894,23 @@ async fn daemon_autostart_lock_waits_long_enough_for_existing_owner() {
     let runtime_root = temp_runtime_root("autostart-lock-wait");
     let lock_path = runtime_root.join("runtime").join("daemon-autostart.lock");
     std::fs::create_dir_all(lock_path.parent().expect("runtime dir")).expect("create runtime dir");
+    let (lock_acquired_tx, lock_acquired_rx) = std::sync::mpsc::channel();
 
     let holder = std::thread::spawn({
         let lock_path = lock_path.clone();
         move || {
-            let mut file = OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&lock_path)
-                .expect("create lock file");
-            writeln!(file, "{}", std::process::id()).expect("write pid");
+            let _guard = crate::runtime_lock::FileLock::acquire(&lock_path)
+                .expect("holder should acquire lock");
+            lock_acquired_tx
+                .send(())
+                .expect("notify holder acquired lock");
             std::thread::sleep(Duration::from_millis(250));
-            let _ = std::fs::remove_file(lock_path);
         }
     });
 
-    std::thread::sleep(Duration::from_millis(20));
+    lock_acquired_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("holder should acquire lock before main thread waits");
     let started = std::time::Instant::now();
     let acquired = crate::runtime_lock::FileLock::acquire_with_retry(
         &lock_path,

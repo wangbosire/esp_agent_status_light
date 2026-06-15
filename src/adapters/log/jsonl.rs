@@ -61,9 +61,14 @@ impl EventLog for JsonlLogAdapter {
         let start = lines.len().saturating_sub(limit);
         let mut items = Vec::new();
         for line in &lines[start..] {
-            let event: LogEvent = serde_json::from_str(line)
-                .map_err(|err| AppError::invalid("parse log event", err))?;
-            items.push(event);
+            match serde_json::from_str(line) {
+                Ok(event) => items.push(event),
+                Err(_) => {
+                    // 日志是排障工具，不能因为一条半写/手改坏行导致整次 tail 失败。
+                    // 坏行会被跳过；后续新日志仍可正常读取。
+                    continue;
+                }
+            }
         }
         Ok(items)
     }

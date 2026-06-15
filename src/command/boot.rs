@@ -10,7 +10,7 @@ use crate::model::{
     RuntimeLogEvent,
 };
 use crate::ports::runtime::RuntimeStore;
-use crate::runtime_lock::{FileLock, process_is_alive};
+use crate::runtime_lock::{FileLock, lock_owner_is_stale, process_is_alive, read_lock_owner};
 
 /// daemon 自启动锁的最大重试次数。
 ///
@@ -283,22 +283,21 @@ fn stale_startup_lock_reason(
     lock_path: &std::path::Path,
     stale_pid: Option<(u32, bool)>,
 ) -> Option<&'static str> {
-    let raw = match fs::read_to_string(lock_path) {
-        Ok(raw) => raw,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+    if !lock_path.exists() {
+        return None;
+    }
+    let owner = match read_lock_owner(lock_path) {
+        Ok(owner) => owner,
         Err(_) => return Some("startup_lock_unreadable"),
     };
-    let owner_pid = match raw.trim().parse::<u32>() {
-        Ok(pid) => pid,
-        Err(_) => return Some("startup_lock_corrupted"),
-    };
+    let owner_pid = owner.pid;
     if matches!(stale_pid, Some((pid, false)) if pid == owner_pid) {
         return Some("startup_lock_matches_dead_daemon_pid");
     }
 
-    match process_is_alive(owner_pid) {
-        Ok(false) => Some("startup_lock_owner_dead"),
-        Ok(true) => None,
+    match lock_owner_is_stale(lock_path) {
+        Ok(true) => Some("startup_lock_owner_dead"),
+        Ok(false) => None,
         Err(_) => None,
     }
 }

@@ -347,7 +347,7 @@ impl Daemon {
     /// 即使模式没变化也要重新写一次设备，保证灯效和内存状态重新对齐。
     async fn sync_effective_mode(&self, force_write: bool) -> AppResult<()> {
         let now = Utc::now();
-        let effective = {
+        let initial_effective = {
             let router = self.router.lock().await;
             router.effective_mode(now)
         };
@@ -358,9 +358,9 @@ impl Daemon {
             code: None,
             source: None,
             session: None,
-            mode: Some(effective),
+            mode: Some(initial_effective),
             context: Some(json!({
-                "effective": effective,
+                "effective": initial_effective,
                 "force_write": force_write,
             })),
         });
@@ -379,9 +379,9 @@ impl Daemon {
                     code: Some("ble_health_timeout"),
                     source: None,
                     session: None,
-                    mode: Some(effective),
+                    mode: Some(initial_effective),
                     context: Some(json!({
-                        "effective": effective,
+                        "effective": initial_effective,
                         "timeout_ms": DEVICE_HEALTH_TIMEOUT.as_millis(),
                     })),
                 });
@@ -401,9 +401,9 @@ impl Daemon {
                 code: None,
                 source: None,
                 session: None,
-                mode: Some(effective),
+                mode: Some(initial_effective),
                 context: Some(json!({
-                    "effective": effective,
+                    "effective": initial_effective,
                 })),
             });
             match timeout(DEVICE_CONNECT_TIMEOUT, device.connect()).await {
@@ -447,9 +447,9 @@ impl Daemon {
                 code: None,
                 source: None,
                 session: None,
-                mode: Some(effective),
+                mode: Some(initial_effective),
                 context: Some(json!({
-                    "effective": effective,
+                    "effective": initial_effective,
                     "reason": "idle_stale",
                     "idle_refresh_interval_secs": DEVICE_IDLE_REFRESH_INTERVAL.as_secs(),
                 })),
@@ -487,6 +487,30 @@ impl Daemon {
                     ));
                 }
             }
+        }
+
+        // 真正写 BLE 前必须重新读取一次最新 effective mode。
+        // `send` 请求会为每次状态更新各自派发后台同步任务；旧任务可能已经在
+        // health/reconnect/device lock 上排队了一段时间。这里刷新后再去重/写入，
+        // 可以避免旧任务拿着过期 mode 覆盖后来的新状态。
+        let effective = {
+            let router = self.router.lock().await;
+            router.effective_mode(Utc::now())
+        };
+        if effective != initial_effective {
+            self.append_runtime_log(RuntimeLogEvent {
+                kind: "runtime_ble",
+                phase: "ble.sync_effective_refreshed",
+                message: "effective mode refreshed before BLE write",
+                code: None,
+                source: None,
+                session: None,
+                mode: Some(effective),
+                context: Some(json!({
+                    "initial_effective": initial_effective,
+                    "refreshed_effective": effective,
+                })),
+            });
         }
 
         // BLE 写入要做节流：只有 effective mode 真正变化时才写设备。

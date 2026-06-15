@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
 use crate::model::{AppError, AppResult};
 
 /// 进程间共享的轻量级文件锁。
@@ -18,6 +21,14 @@ use crate::model::{AppError, AppResult};
 /// - 足以覆盖本项目里短时间串行化的小临界区。
 pub struct FileLock {
     path: PathBuf,
+    token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LockOwner {
+    pub pid: u32,
+    pub token: Option<String>,
+    pub start_signature: Option<String>,
 }
 
 impl FileLock {
@@ -53,13 +64,22 @@ impl FileLock {
         for _ in 0..max_attempts {
             match OpenOptions::new().create_new(true).write(true).open(&path) {
                 Ok(mut file) => {
-                    // 锁文件内容记录持有者 pid，便于下次启动时判断是否为僵尸锁。
-                    writeln!(file, "{}", std::process::id())
+                    // 锁文件记录 pid + token。pid 用于判断 owner 是否存活，
+                    // token 用于 Drop 时只删除自己真正持有的锁，避免误删后继 owner。
+                    let token = Uuid::new_v4().to_string();
+                    let owner = LockOwner {
+                        pid: std::process::id(),
+                        token: Some(token.clone()),
+                        start_signature: process_start_signature(std::process::id()),
+                    };
+                    let raw = serde_json::to_string(&owner)
+                        .map_err(|err| AppError::invalid("serialize file lock owner", err))?;
+                    writeln!(file, "{raw}")
                         .map_err(|err| AppError::io("write file lock pid", err))?;
-                    return Ok(Self { path });
+                    return Ok(Self { path, token });
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                    match stale_lock_owner(&path) {
+                    match lock_owner_is_stale(&path) {
                         Ok(true) => {
                             // 明确确认旧持有者已死时，直接清理僵尸锁再重试。
                             let _ = fs::remove_file(&path);
@@ -88,8 +108,11 @@ impl FileLock {
 
 impl Drop for FileLock {
     fn drop(&mut self) {
-        // Drop 阶段只做尽力清理，不能因为删锁失败影响主流程收尾。
-        let _ = std::fs::remove_file(&self.path);
+        // Drop 阶段只做尽力清理，且只删除当前 token 对应的锁。
+        // 如果锁文件曾被判 stale 后被其它进程重新创建，旧 owner 的 Drop 不应误删新锁。
+        if lock_owner_has_token(&self.path, &self.token).unwrap_or(false) {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -126,14 +149,74 @@ pub fn process_is_alive(pid: u32) -> AppResult<bool> {
     }
 }
 
-fn stale_lock_owner(path: &Path) -> AppResult<bool> {
-    // 锁文件的唯一语义就是“里面记录了持锁 pid”，因此这里只解析这一项。
-    // 如果文件内容不是合法 PID，调用方会把它视为损坏锁并移除，
-    // 这样可以避免一份脏数据永久卡死整个链路。
+pub fn read_lock_owner(path: &Path) -> AppResult<LockOwner> {
     let raw = fs::read_to_string(path).map_err(|err| AppError::io("read file lock pid", err))?;
+    parse_lock_owner(raw.trim())
+}
+
+pub fn lock_owner_is_stale(path: &Path) -> AppResult<bool> {
+    let owner = read_lock_owner(path)?;
+    if !process_is_alive(owner.pid)? {
+        return Ok(true);
+    }
+
+    // pid 复用时，`kill -0` / tasklist 只能证明“这个 pid 现在活着”，
+    // 不能证明它仍是当初持锁的进程。能拿到进程启动签名时，再做一次交叉校验。
+    if let (Some(owner_start), Some(current_start)) = (
+        owner.start_signature.as_deref(),
+        process_start_signature(owner.pid).as_deref(),
+    ) {
+        return Ok(owner_start != current_start);
+    }
+
+    Ok(false)
+}
+
+fn parse_lock_owner(raw: &str) -> AppResult<LockOwner> {
+    if raw.starts_with('{') {
+        return serde_json::from_str(raw)
+            .map_err(|err| AppError::invalid("parse file lock owner", err));
+    }
+
+    // 兼容旧版本只写 pid 的锁文件；这类锁无法做 token/exe 校验。
     let pid = raw
-        .trim()
         .parse::<u32>()
         .map_err(|err| AppError::invalid("parse file lock pid", err))?;
-    Ok(!process_is_alive(pid)?)
+    Ok(LockOwner {
+        pid,
+        token: None,
+        start_signature: None,
+    })
+}
+
+fn lock_owner_has_token(path: &Path, token: &str) -> AppResult<bool> {
+    read_lock_owner(path).map(|owner| owner.token.as_deref() == Some(token))
+}
+
+fn process_start_signature(pid: u32) -> Option<String> {
+    #[cfg(unix)]
+    {
+        let output = std::process::Command::new("ps")
+            .arg("-p")
+            .arg(pid.to_string())
+            .arg("-o")
+            .arg("lstart=")
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let command = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if command.is_empty() {
+            None
+        } else {
+            Some(command)
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        let _ = pid;
+        None
+    }
 }

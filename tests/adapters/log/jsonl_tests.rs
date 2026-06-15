@@ -132,3 +132,29 @@ fn corrupted_lock_file_is_recovered_on_next_append() {
 
     let _ = std::fs::remove_dir_all(runtime.runtime_root());
 }
+
+#[test]
+fn tail_skips_corrupted_lines_and_keeps_valid_entries() {
+    let runtime = Arc::new(FsRuntimeAdapter::new(temp_runtime_root("tail-skip")));
+    runtime.ensure_layout().expect("layout should succeed");
+    let path = runtime.events_log_path();
+    std::fs::create_dir_all(path.parent().expect("events dir")).expect("create runtime dir");
+    std::fs::write(
+        &path,
+        format!(
+            "{}\n{}\n{}\n",
+            serde_json::to_string(&sample_event(1)).expect("serialize event"),
+            "not-json",
+            serde_json::to_string(&sample_event(2)).expect("serialize event")
+        ),
+    )
+    .expect("write events log");
+
+    let adapter = JsonlLogAdapter::new(runtime.clone());
+    let items = adapter.tail(20).expect("tail should skip corrupted lines");
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].message, "message-1");
+    assert_eq!(items[1].message, "message-2");
+
+    let _ = std::fs::remove_dir_all(runtime.runtime_root());
+}

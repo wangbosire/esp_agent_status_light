@@ -27,9 +27,9 @@
 | `src/command.rs` | 装配 runtime / log / platform / source registry / install registry；处理自动拉起 daemon；把 Hook stdin 归一后发往 IPC | CLI 参数、Hook stdin JSON | `SendPayload`、IPC 请求、状态输出 |
 | `src/adapters/source/*.rs` | 按 `source` 解析 Codex / Cursor / Claude Hook JSON，抽取 `session`、`turn`、`semantics`、`capability`、`suggested_mode` | 宿主工具 Hook JSON | `AgentEvent` |
 | `src/router.rs` | `resolve_mode` 与 `StateRouter`；按 `(source, session)` 维护状态池，处理 TTL、优先级、AI 保留规则 | `AgentEvent`、`SendPayload` | 当前 session 状态、全局 `effective mode` |
-| `src/daemon.rs` | 独占 `LightDevice`；接收 IPC；调用 router；执行 BLE 写入；维护 TTL 清理与断线重连后台任务 | IPC 请求、router 决策结果 | BLE 写入、`StatusResponse`、日志 |
+| `src/daemon.rs` | 独占 `LightDevice`；接收 IPC；调用 router；派发后台 BLE 同步；写前刷新最新 effective；维护 TTL 清理与断线重连后台任务 | IPC 请求、router 决策结果 | BLE 写入、`StatusResponse`、日志 |
 | `src/adapters/install/*.rs` | 把统一 `HookSpec` 翻译成 Codex / Cursor / Claude 的官方配置结构 | 安装目标、配置 JSON、平台差异 | 更新后的 hooks/settings JSON |
-| `src/adapters/runtime/fs.rs` | 统一管理 runtime 根目录、日志、IPC 信息、安装清单和稳定二进制副本路径 | runtime root | `runtime/`、`bin/`、`config.<target>.json` |
+| `src/adapters/runtime/fs.rs` / `src/runtime_lock.rs` | 统一管理 runtime 根目录、日志、IPC 信息、安装清单、稳定二进制副本路径和跨进程文件锁 | runtime root、锁 owner | `runtime/`、`bin/`、`config.<target>.json`、token 化 lock 文件 |
 
 ### 1.2 当前系统架构图
 
@@ -153,17 +153,24 @@ sequenceDiagram
     IPC->>Daemon: IpcRequestPayload::Send
     Daemon->>Router: apply_send(payload, now)
     Router-->>Daemon: effective_mode
-    Daemon->>Device: sync_effective_mode(false)
-    alt effective mode 变化或需要补写
-        Device->>Device: connect if disconnected
-        Device-->>Daemon: write_mode(effective)
+    Daemon-->>IPC: accepted(queued=true)
+    Daemon->>Device: 后台 sync_effective_mode(false)
+    Daemon->>Device: health()
+    alt disconnected 或 idle stale
+        Daemon->>Device: connect()
+    end
+    Daemon->>Router: 写入前重新读取 latest effective
+    Router-->>Daemon: latest effective_mode
+    alt latest effective 变化或需要补写
+        Device-->>Daemon: write_mode(latest effective)
     else effective mode 未变化
         Device-->>Daemon: skip write
     end
-    Daemon-->>IPC: accepted / error(accepted=true, queued=true)
     IPC-->>Send: IpcResponseEnvelope
     Send-->>Hook: quiet 成功或按 strict/warning 降级
 ```
+
+说明：`send` 在 router 接受状态后立即返回 `queued=true`，BLE 写入作为后台副作用执行。后台任务在真正写设备前会重新读取 router 的最新 effective mode，避免旧同步任务在 device lock、health 或 reconnect 上排队后，把设备写回已经过期的旧状态。
 
 ### 2.2 daemon 启动、自恢复与重连时序图
 
@@ -176,16 +183,21 @@ sequenceDiagram
     participant Platform as PlatformAdapter
     participant Daemon as esp daemon
     participant Runtime as RuntimeStore
+    participant Lock as FileLock
     participant Server as IpcServer
     participant Device as LightDevice / BLE
 
     User->>Send: 首次执行 send / daemon / status
     Send->>Boot: request_with_auto_start(...)
     alt daemon 未运行
+        Boot->>Lock: acquire daemon-autostart.lock<br/>owner = pid + token + start_signature
+        Boot->>Server: status 探活
+        Boot->>Lock: 清理确认 stale 的 daemon.lock / pid / ipc marker
         Boot->>Platform: spawn_background_daemon(current_exe)
         Platform-->>Daemon: 启动后台进程
+        Daemon->>Lock: acquire daemon.lock
         Daemon->>Runtime: ensure_layout / write_pid / write_ipc_info
-        Daemon->>Device: try_connect_device()
+        Daemon-->>Device: 后台 try_connect_device()
         Daemon->>Server: serve(handler)
         Boot->>Server: 重试发送原始 IPC 请求
     else daemon 已运行
@@ -200,6 +212,7 @@ sequenceDiagram
         Daemon->>Daemon: prune_expired()
         alt effective mode 改变
             Daemon->>Device: sync_effective_mode(false)
+            Daemon->>Daemon: 写入前刷新 latest effective
         end
     end
 
@@ -209,10 +222,13 @@ sequenceDiagram
             Daemon->>Device: connect()
             alt 重连成功
                 Daemon->>Device: sync_effective_mode(true)
+                Daemon->>Daemon: 强制补写 latest effective
             end
         end
     end
 ```
+
+说明：`FileLock` 的 owner 使用 JSON 保存 `pid`、随机 `token` 和可选 `start_signature`。`pid` 用于判断进程是否存活，`start_signature` 用于在平台允许时识别 PID 复用，`token` 用于确保 Drop 只删除自己持有的锁文件。若启动签名不可读取，逻辑会保守地等待活跃 PID，而不是误删可能仍被持有的锁。
 
 ### 2.3 路由与覆盖规则判定图
 
@@ -240,7 +256,9 @@ flowchart TD
     Ignore --> Effective
 
     Effective --> Pick["在所有未过期状态中按 priority，再按 updated_at 选择最高者"]
-    Pick --> Sync["sync_effective_mode() 写入或跳过 BLE"]
+    Pick --> Queue["返回 accepted，并派发后台 sync_effective_mode()"]
+    Queue --> Refresh["写 BLE 前重新读取 latest effective"]
+    Refresh --> Sync["写入 latest effective 或跳过 BLE"]
 ```
 
 ### 2.4 mode 决策优先顺序图
@@ -259,6 +277,36 @@ flowchart TD
     E -- yes --> M4["Thinking/Generating/RunningCommand/... -> Mode"]
     E -- no --> M5["退回 explicit_mode"]
 ```
+
+### 2.5 BLE 后台同步与写前刷新图
+
+`send` 的成功语义是“daemon 已接受状态并排队同步设备”，不是“BLE 已完成写入”。真实 BLE 写入由后台任务尽力执行：
+
+```mermaid
+flowchart TD
+    Accepted["handle_send: router.apply_send 成功"] --> Spawn["spawn SendSyncContext"]
+    Spawn --> Return["立即返回 accepted<br/>queued=true"]
+    Spawn --> Sync["后台 sync_effective_mode(force_write)"]
+
+    Sync --> Initial["读取 initial effective<br/>用于日志和本轮同步上下文"]
+    Initial --> DeviceLock["获取 LightDevice mutex"]
+    DeviceLock --> Health["health() 探测"]
+    Health --> Connected{"connected?"}
+    Connected -- no --> Reconnect["connect() 重连"]
+    Connected -- yes --> Stale{"距离上次成功写入过久?"}
+    Stale -- yes --> Reconnect
+    Stale -- no --> Refresh
+    Reconnect --> Refresh["写 BLE 前重新读取 latest effective"]
+
+    Refresh --> Changed{"latest effective != last_applied<br/>或 force/reconnect?"}
+    Changed -- yes --> Write["write_mode(latest effective)"]
+    Changed -- no --> Skip["skip unchanged write"]
+    Write --> Cache["更新 last_applied_mode<br/>last_ble_write_at<br/>DeviceHealth"]
+    Skip --> Done["同步完成"]
+    Cache --> Done
+```
+
+这张图的关键点是 `Refresh`：旧同步任务即使已经在 `health()`、`connect()` 或 device mutex 上等待了一段时间，也必须在真正写入前重新读取 router 的最新 effective mode。
 
 ***
 
@@ -371,7 +419,20 @@ classDiagram
 | runtime 根目录 | 平台适配器决定，例如 `~/.esp-agent-status-light` | 统一保存安装清单、稳定二进制、副作用运行文件 |
 | 稳定二进制副本 | `<runtime_root>/bin/esp` 或 `esp.exe` | release / 分发场景下 Hook 实际引用的命令路径 |
 | 安装清单 | `<runtime_root>/config.<target>.json` | 记录最近一次安装的 `target`、`config_path`、`command_path` |
-| daemon 运行信息 | `<runtime_root>/runtime/daemon.pid`、`ipc.json`、日志文件 | daemon 自恢复、排障与 `status` 查询 |
+| daemon 运行信息 | `<runtime_root>/runtime/daemon.pid`、`ipc.json`、`daemon.lock`、`daemon-autostart.lock` | daemon 自恢复、启动串行化、排障与 `status` 查询 |
+| 日志文件 | `<runtime_root>/runtime/events.log`、`runtime.log`、`runtime.lock` | `logs` 读取用户事件；runtime 链路日志用于排查；日志写入通过 token 化文件锁串行化 |
+
+文件锁 owner 当前采用 JSON 结构，兼容旧版本 pid-only 锁文件：
+
+```json
+{
+  "pid": 12345,
+  "token": "random-uuid",
+  "start_signature": "Mon Jun 15 12:34:56 2026"
+}
+```
+
+`pid` 用于存活检查，`start_signature` 在平台允许读取时用于识别 PID 复用，`token` 用于防止旧 owner Drop 时误删新 owner 的锁。
 
 ### 4.2 install / uninstall 时序图
 

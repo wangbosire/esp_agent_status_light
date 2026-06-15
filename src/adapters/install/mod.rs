@@ -10,8 +10,10 @@ pub mod codex;
 pub mod cursor;
 
 use serde_json::{Map, Value, json};
+use std::path::Path;
+use std::time::Duration;
 
-use crate::model::{AppError, AppResult, HookCommand};
+use crate::model::{AppError, AppResult, HookCommand, HookSpec, Mode};
 use crate::ports::hook_install::HookInstallRegistry;
 use crate::ports::platform::PlatformAdapter;
 
@@ -73,6 +75,44 @@ fn decorate_command_fields(
 ) {
     // 具体写哪些字段交给平台层决定，安装器本身不关心 Windows / POSIX 差异。
     platform.decorate_hook_command(object, command);
+}
+
+/// 构造一条通过 `esp send` 上报状态的 Hook 规则。
+///
+/// 这里刻意只收敛“如何调用本工具”这段机械命令；
+/// 事件名、matcher 和 mode 的语义仍然由各宿主 adapter 自己决定。
+pub(crate) fn send_hook_spec(
+    target: &str,
+    exe: &Path,
+    event: &str,
+    matcher: Option<&str>,
+    mode: Mode,
+    ttl: u64,
+) -> HookSpec {
+    HookSpec {
+        target: target.into(),
+        event: event.into(),
+        matcher: matcher.map(ToOwned::to_owned),
+        fallback_mode: mode,
+        ttl: Duration::from_secs(ttl),
+        command: HookCommand {
+            exe: exe.to_path_buf(),
+            args: vec![
+                "send".into(),
+                "--mode".into(),
+                mode.as_str().into(),
+                "--source".into(),
+                target.into(),
+                "--session".into(),
+                "auto".into(),
+                "--ttl".into(),
+                ttl.to_string(),
+                "--quiet".into(),
+                "--hook-id".into(),
+                "agent-status-light".into(),
+            ],
+        },
+    }
 }
 
 /// 从 Codex/Claude 风格的 hooks 结构中移除本工具托管条目。

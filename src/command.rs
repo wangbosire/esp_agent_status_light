@@ -31,7 +31,7 @@ use crate::ports::ipc::{IpcServer, IpcTransport};
 use crate::ports::log::EventLog;
 use crate::ports::platform::PlatformAdapter;
 use crate::ports::runtime::RuntimeStore;
-use crate::ports::source::SourceAdapterRegistry;
+use crate::ports::source::{FallbackReason, SourceAdapterRegistry};
 use crate::router::resolve_mode;
 use boot::{ensure_daemon_running, force_stop_by_pid, request_with_auto_start};
 use install::{backup_if_exists, read_json_or_empty, resolve_install_command, write_json};
@@ -332,8 +332,40 @@ async fn run_send(ctx: AppContext, args: SendCommandArgs) -> AppResult<CommandOu
                 })),
             },
         );
-        ctx.source_registry
-            .parse_or_fallback(stdin_json, &ctx_parse)
+        let parsed = ctx
+            .source_registry
+            .parse_or_fallback_with_reason(stdin_json, &ctx_parse);
+        if let Some(reason) = &parsed.fallback_reason {
+            let (code, message, context) = match reason {
+                FallbackReason::SourceMissing(source) => (
+                    "source_adapter_missing",
+                    "source adapter missing, using fallback parser",
+                    json!({ "source": source }),
+                ),
+                FallbackReason::ParseFailed(err) => (
+                    err.code.as_str(),
+                    "source adapter parse failed, using fallback parser",
+                    json!({
+                        "error_code": err.code,
+                        "error_message": err.message,
+                    }),
+                ),
+            };
+            append_runtime_log(
+                ctx.log.as_ref(),
+                RuntimeLogEvent {
+                    kind: "runtime_send",
+                    phase: "send.hook_parse_fallback",
+                    message,
+                    code: Some(code),
+                    source: Some(&args.source),
+                    session: None,
+                    mode: Some(args.explicit_mode),
+                    context: Some(context),
+                },
+            );
+        }
+        parsed.event
     };
     append_runtime_log(
         ctx.log.as_ref(),
@@ -624,11 +656,20 @@ async fn run_uninstall(
         .map(InstallScope::Project)
         .unwrap_or(InstallScope::Global);
     let config_path = adapter.config_path(&scope)?;
-    let config = read_json_or_empty(&config_path)?;
-    if config_path.exists() {
-        backup_if_exists(&config_path)?;
+    if !config_path.exists() {
+        return Ok(CommandOutput::Json(json!({
+            "ok": true,
+            "target": target,
+            "config_path": config_path,
+            "changed": false,
+        })));
     }
+    let config = read_json_or_empty(&config_path)?;
+    backup_if_exists(&config_path)?;
     let updated = adapter.uninstall(config, "agent-status-light")?;
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent).map_err(|err| AppError::io("create target config dir", err))?;
+    }
     write_json(&config_path, &updated)?;
     Ok(CommandOutput::Json(json!({
         "ok": true,

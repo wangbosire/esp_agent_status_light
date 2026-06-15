@@ -8,6 +8,17 @@ use chrono::Utc;
 use super::*;
 use crate::model::{AgentEvent, AgentSource, EventSemantics};
 
+trait StateRouterTestExt {
+    fn apply_send_ok(&mut self, payload: &SendPayload, now: chrono::DateTime<Utc>) -> Mode;
+}
+
+impl StateRouterTestExt for StateRouter {
+    fn apply_send_ok(&mut self, payload: &SendPayload, now: chrono::DateTime<Utc>) -> Mode {
+        self.apply_send(payload, now)
+            .expect("router should accept test payload")
+    }
+}
+
 #[test]
 fn resolve_mode_prefers_suggested_mode() {
     let ctx = HookParseContext {
@@ -34,7 +45,7 @@ fn resolve_mode_prefers_suggested_mode() {
 fn manual_off_clears_all_states() {
     let now = Utc::now();
     let mut router = StateRouter::new();
-    router.apply_send(
+    router.apply_send_ok(
         &SendPayload {
             mode: Mode::Busy,
             source: "codex".into(),
@@ -53,7 +64,7 @@ fn manual_off_clears_all_states() {
     );
     assert_eq!(router.effective_mode(now), Mode::Busy);
 
-    router.apply_send(
+    router.apply_send_ok(
         &SendPayload {
             mode: Mode::Off,
             source: "manual".into(),
@@ -92,7 +103,7 @@ fn latest_state_overrides_error_in_same_turn() {
         turn: Some("turn-1".into()),
         semantics: EventSemantics::Failure,
     };
-    router.apply_send(&error, now);
+    router.apply_send_ok(&error, now);
 
     let success = SendPayload {
         mode: Mode::Success,
@@ -108,8 +119,33 @@ fn latest_state_overrides_error_in_same_turn() {
         turn: Some("turn-1".into()),
         semantics: EventSemantics::Completion,
     };
-    assert_eq!(router.apply_send(&success, now), Mode::Success);
+    assert_eq!(router.apply_send_ok(&success, now), Mode::Success);
     assert_eq!(router.effective_mode(now), Mode::Success);
+}
+
+#[test]
+fn oversized_ttl_is_rejected_instead_of_overflowing() {
+    let now = Utc::now();
+    let mut router = StateRouter::new();
+    let payload = SendPayload {
+        mode: Mode::Busy,
+        source: "codex".into(),
+        session: "abc".into(),
+        ttl: Some(u64::MAX),
+        hook_id: None,
+        raw_event: None,
+        raw_tool: None,
+        capability: None,
+        suggested_mode: None,
+        cwd: None,
+        turn: None,
+        semantics: EventSemantics::Unknown,
+    };
+
+    let err = router
+        .apply_send(&payload, now)
+        .expect_err("oversized ttl should be rejected");
+    assert_eq!(err.code, "invalid_input");
 }
 
 #[test]
@@ -130,7 +166,7 @@ fn latest_state_overrides_alarm_in_same_session() {
         turn: None,
         semantics: EventSemantics::UserAttention,
     };
-    router.apply_send(&alarm, now);
+    router.apply_send_ok(&alarm, now);
 
     let success = SendPayload {
         mode: Mode::Success,
@@ -147,7 +183,7 @@ fn latest_state_overrides_alarm_in_same_session() {
         semantics: EventSemantics::Completion,
     };
     let later = now + ChronoDuration::seconds(1);
-    assert_eq!(router.apply_send(&success, later), Mode::Success);
+    assert_eq!(router.apply_send_ok(&success, later), Mode::Success);
     assert_eq!(router.effective_mode(later), Mode::Success);
 }
 
@@ -170,7 +206,7 @@ fn latest_state_replaces_same_session_even_when_priority_is_lower() {
         turn: None,
         semantics: EventSemantics::Continuation,
     };
-    assert_eq!(router.apply_send(&thinking, now), Mode::Thinking);
+    assert_eq!(router.apply_send_ok(&thinking, now), Mode::Thinking);
 
     let success = SendPayload {
         mode: Mode::Success,
@@ -187,7 +223,7 @@ fn latest_state_replaces_same_session_even_when_priority_is_lower() {
         semantics: EventSemantics::Completion,
     };
     let later = now + ChronoDuration::seconds(1);
-    assert_eq!(router.apply_send(&success, later), Mode::Success);
+    assert_eq!(router.apply_send_ok(&success, later), Mode::Success);
 
     let snapshot = router.snapshot(later);
     assert_eq!(snapshot.len(), 1);
@@ -214,7 +250,7 @@ fn generic_busy_continuation_does_not_override_ai_in_same_session() {
         turn: Some("turn-1".into()),
         semantics: EventSemantics::FileWrite,
     };
-    assert_eq!(router.apply_send(&ai, now), Mode::Ai);
+    assert_eq!(router.apply_send_ok(&ai, now), Mode::Ai);
 
     let generic_busy = SendPayload {
         mode: Mode::Busy,
@@ -231,7 +267,7 @@ fn generic_busy_continuation_does_not_override_ai_in_same_session() {
         semantics: EventSemantics::Continuation,
     };
     let later = now + ChronoDuration::seconds(1);
-    assert_eq!(router.apply_send(&generic_busy, later), Mode::Ai);
+    assert_eq!(router.apply_send_ok(&generic_busy, later), Mode::Ai);
 
     let snapshot = router.snapshot(later);
     assert_eq!(snapshot.len(), 1);
@@ -258,7 +294,7 @@ fn explicit_shell_busy_still_overrides_ai_in_same_session() {
         turn: Some("turn-1".into()),
         semantics: EventSemantics::FileWrite,
     };
-    assert_eq!(router.apply_send(&ai, now), Mode::Ai);
+    assert_eq!(router.apply_send_ok(&ai, now), Mode::Ai);
 
     let shell_busy = SendPayload {
         mode: Mode::Busy,
@@ -275,7 +311,7 @@ fn explicit_shell_busy_still_overrides_ai_in_same_session() {
         semantics: EventSemantics::ExplicitToolExecution,
     };
     let later = now + ChronoDuration::seconds(1);
-    assert_eq!(router.apply_send(&shell_busy, later), Mode::Busy);
+    assert_eq!(router.apply_send_ok(&shell_busy, later), Mode::Busy);
 
     let snapshot = router.snapshot(later);
     assert_eq!(snapshot.len(), 1);

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::adapters::source::fallback::FallbackAdapter;
-use crate::model::{AgentEvent, AppResult, HookParseContext};
+use crate::model::{AgentEvent, AppError, AppResult, HookParseContext};
 
 /// SourceAdapter 负责把不同 Agent 的 Hook stdin 归一成统一事件。
 pub trait SourceAdapter: Send + Sync {
@@ -55,13 +55,45 @@ impl SourceAdapterRegistry {
     ///
     /// 这样可以满足“Hook 失败不阻断主流程”的要求：
     /// 即使某个宿主升级了字段结构，系统也至少还能退回显式 mode 或默认逻辑。
+    #[cfg(test)]
     pub fn parse_or_fallback(&self, input: Value, ctx: &HookParseContext) -> AgentEvent {
+        self.parse_or_fallback_with_reason(input, ctx).event
+    }
+
+    pub fn parse_or_fallback_with_reason(
+        &self,
+        input: Value,
+        ctx: &HookParseContext,
+    ) -> ParsedAgentEvent {
         // 先尝试来源专属解析，再落到 fallback。
         // 这样即使某个宿主字段升级了，也不会让整个 Hook 入口直接失效。
         // 指定来源解析失败时不会让 Hook 整体失败，而是回退到 lossy 解析，
         // 这与“Hook 失败不得阻塞 Agent 主流程”的设计目标一致。
-        self.get(&ctx.source)
-            .and_then(|adapter| adapter.parse(input.clone(), ctx).ok())
-            .unwrap_or_else(|| FallbackAdapter.parse_lossy(input, ctx))
+        match self.get(&ctx.source) {
+            Some(adapter) => match adapter.parse(input.clone(), ctx) {
+                Ok(event) => ParsedAgentEvent {
+                    event,
+                    fallback_reason: None,
+                },
+                Err(err) => ParsedAgentEvent {
+                    event: FallbackAdapter.parse_lossy(input, ctx),
+                    fallback_reason: Some(FallbackReason::ParseFailed(err)),
+                },
+            },
+            None => ParsedAgentEvent {
+                event: FallbackAdapter.parse_lossy(input, ctx),
+                fallback_reason: Some(FallbackReason::SourceMissing(ctx.source.clone())),
+            },
+        }
     }
+}
+
+pub struct ParsedAgentEvent {
+    pub event: AgentEvent,
+    pub fallback_reason: Option<FallbackReason>,
+}
+
+pub enum FallbackReason {
+    SourceMissing(String),
+    ParseFailed(AppError),
 }

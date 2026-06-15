@@ -3,7 +3,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::model::{AppError, AppResult, LogEvent};
 use crate::ports::log::EventLog;
@@ -12,17 +12,23 @@ use crate::runtime_lock::FileLock;
 
 /// 运行日志只保留最近 3000 条，避免长期运行后单文件无限膨胀。
 const MAX_RUNTIME_LOG_ENTRIES: usize = 3000;
+const RUNTIME_LOG_TRIM_INTERVAL: usize = 128;
 
 #[derive(Clone)]
 pub struct JsonlLogAdapter {
     /// 通过 runtime store 获取日志路径，避免日志实现自己关心目录布局。
     runtime: Arc<dyn RuntimeStore>,
+    /// 运行日志不需要每条 append 都全量读文件裁剪；用计数器做低频修剪。
+    runtime_writes_since_trim: Arc<Mutex<usize>>,
 }
 
 impl JsonlLogAdapter {
     /// 使用给定 runtime store 创建 JSONL 日志实现。
     pub fn new(runtime: Arc<dyn RuntimeStore>) -> Self {
-        Self { runtime }
+        Self {
+            runtime,
+            runtime_writes_since_trim: Arc::new(Mutex::new(0)),
+        }
     }
 }
 
@@ -75,14 +81,34 @@ impl JsonlLogAdapter {
             .map_err(|err| AppError::invalid("serialize log event", err))?;
         append_jsonl_line(events_path, &line, "events")?;
         append_jsonl_line(runtime_path, &line, "runtime")?;
-        maybe_trim_jsonl_to_last_n(runtime_path, MAX_RUNTIME_LOG_ENTRIES, "runtime")
+        self.maybe_trim_runtime_log(runtime_path)
     }
 
     fn append_runtime_locked(&self, runtime_path: &Path, event: LogEvent) -> AppResult<()> {
         let line = serde_json::to_string(&event)
             .map_err(|err| AppError::invalid("serialize runtime log event", err))?;
         append_jsonl_line(runtime_path, &line, "runtime")?;
-        maybe_trim_jsonl_to_last_n(runtime_path, MAX_RUNTIME_LOG_ENTRIES, "runtime")
+        self.maybe_trim_runtime_log(runtime_path)
+    }
+
+    fn maybe_trim_runtime_log(&self, runtime_path: &Path) -> AppResult<()> {
+        let should_trim = {
+            let mut writes = self.runtime_writes_since_trim.lock().map_err(|_| {
+                AppError::new("lock_poisoned", "runtime log trim counter lock poisoned")
+            })?;
+            *writes += 1;
+            if *writes < RUNTIME_LOG_TRIM_INTERVAL {
+                false
+            } else {
+                *writes = 0;
+                true
+            }
+        };
+        if should_trim {
+            trim_jsonl_to_last_n(runtime_path, MAX_RUNTIME_LOG_ENTRIES, "runtime")
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -99,7 +125,7 @@ fn append_jsonl_line(path: &Path, line: &str, label: &str) -> AppResult<()> {
 /// 将 JSONL 日志裁剪到最近 N 条。
 ///
 /// runtime 日志更偏排障用途，因此允许按条数截断来控制文件体积。
-fn maybe_trim_jsonl_to_last_n(path: &Path, max_entries: usize, label: &str) -> AppResult<()> {
+fn trim_jsonl_to_last_n(path: &Path, max_entries: usize, label: &str) -> AppResult<()> {
     let raw =
         fs::read_to_string(path).map_err(|err| AppError::io(&format!("read {label} log"), err))?;
     let lines: Vec<&str> = raw.lines().collect();

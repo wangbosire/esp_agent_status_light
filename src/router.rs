@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 
 use crate::model::{
-    AgentCapability, AgentEvent, EventSemantics, HookParseContext, Mode, SendPayload, SourceState,
-    StatusSourceEntry,
+    AgentCapability, AgentEvent, AppError, AppResult, EventSemantics, HookParseContext, Mode,
+    SendPayload, SourceState, StatusSourceEntry,
 };
 
 /// `resolve_mode` 是 Hook 场景中最关键的决策函数之一。
@@ -59,7 +59,7 @@ impl StateRouter {
 
     /// 所有 daemon 内部状态变更最终都要经过这里。
     /// 这样“失败态不被成功态误覆盖”“manual off 清空全局”等规则只存在一份实现。
-    pub fn apply_send(&mut self, payload: &SendPayload, now: DateTime<Utc>) -> Mode {
+    pub fn apply_send(&mut self, payload: &SendPayload, now: DateTime<Utc>) -> AppResult<Mode> {
         self.prune_expired(now);
 
         let key = (payload.source.clone(), payload.session.clone());
@@ -74,7 +74,7 @@ impl StateRouter {
             } else {
                 self.states.remove(&key);
             }
-            return self.effective_mode(now);
+            return Ok(self.effective_mode(now));
         }
 
         self.manual_hold_off = false;
@@ -85,7 +85,8 @@ impl StateRouter {
         // 这样既保留人工覆盖能力，又不需要每个来源 adapter 都自己决定存活时长。
         let ttl = payload
             .ttl
-            .map(|ttl| ChronoDuration::seconds(ttl as i64))
+            .map(ttl_seconds_to_chrono)
+            .transpose()?
             .or_else(|| payload.mode.default_ttl().map(duration_to_chrono));
 
         let candidate = SourceState {
@@ -110,7 +111,7 @@ impl StateRouter {
             }
         }
 
-        self.effective_mode(now)
+        Ok(self.effective_mode(now))
     }
 
     /// 移除所有已经到达过期时间的状态。
@@ -242,6 +243,21 @@ impl StateRouter {
 fn duration_to_chrono(duration: std::time::Duration) -> ChronoDuration {
     // `chrono` 与 `std::time` 分属两个世界，这里统一做一次桥接转换。
     ChronoDuration::seconds(duration.as_secs() as i64)
+}
+
+fn ttl_seconds_to_chrono(ttl: u64) -> AppResult<ChronoDuration> {
+    let seconds = i64::try_from(ttl).map_err(|_| {
+        AppError::invalid(
+            "parse ttl",
+            format!("ttl seconds exceed supported range: {ttl}"),
+        )
+    })?;
+    ChronoDuration::try_seconds(seconds).ok_or_else(|| {
+        AppError::invalid(
+            "parse ttl",
+            format!("ttl seconds exceed chrono duration range: {ttl}"),
+        )
+    })
 }
 
 /// 判断是否应保留当前 `ai` 生成态，而不是被泛化的 `busy` 覆盖。

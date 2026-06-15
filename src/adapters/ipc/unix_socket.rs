@@ -16,6 +16,8 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::watch;
 use tokio::time::{Duration, timeout};
 
+const IPC_SERVER_READ_TIMEOUT: Duration = Duration::from_secs(2);
+
 use crate::model::{AppError, AppResult, IpcInfo, IpcRequestEnvelope, IpcResponseEnvelope};
 use crate::ports::ipc::{IpcRequestHandler, IpcServer, IpcTransport};
 
@@ -166,9 +168,9 @@ async fn handle_stream(
     let mut line = String::new();
     {
         let mut reader = BufReader::new(&mut stream);
-        reader
-            .read_line(&mut line)
+        timeout(IPC_SERVER_READ_TIMEOUT, reader.read_line(&mut line))
             .await
+            .map_err(|_| AppError::new("ipc_timeout", "read unix socket request timed out"))?
             .map_err(|err| AppError::io("read unix socket request", err))?;
     }
 

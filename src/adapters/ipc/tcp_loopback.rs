@@ -12,6 +12,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 use tokio::time::{Duration, timeout};
 
+const IPC_SERVER_READ_TIMEOUT: Duration = Duration::from_secs(2);
+
 use crate::model::{AppError, AppResult, IpcInfo, IpcRequestEnvelope, IpcResponseEnvelope};
 use crate::ports::ipc::{IpcRequestHandler, IpcServer, IpcTransport};
 
@@ -110,7 +112,7 @@ impl IpcServer for TcpLoopbackServer {
                         let mut line = String::new();
                         {
                             let mut reader = BufReader::new(&mut stream);
-                            if reader.read_line(&mut line).await.is_err() {
+                            if timeout(IPC_SERVER_READ_TIMEOUT, reader.read_line(&mut line)).await.is_err() {
                                 return;
                             }
                         }

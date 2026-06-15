@@ -25,6 +25,9 @@ use tokio::net::windows::named_pipe::{
 #[cfg(windows)]
 use tokio::time::{Duration, sleep, timeout};
 
+#[cfg(windows)]
+const IPC_SERVER_READ_TIMEOUT: Duration = Duration::from_secs(2);
+
 #[derive(Debug, Clone)]
 pub struct NamedPipeTransport {
     /// 命令层传入的“逻辑 IPC 路径”。
@@ -259,9 +262,9 @@ async fn handle_pipe_stream(
     let mut line = String::new();
     {
         let mut reader = BufReader::new(&mut stream);
-        reader
-            .read_line(&mut line)
+        timeout(IPC_SERVER_READ_TIMEOUT, reader.read_line(&mut line))
             .await
+            .map_err(|_| AppError::new("ipc_timeout", "read named pipe request timed out"))?
             .map_err(|err| AppError::io("read named pipe request", err))?;
     }
 

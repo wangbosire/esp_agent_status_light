@@ -81,11 +81,12 @@ fn append_runtime_writes_only_runtime_log() {
 }
 
 #[test]
-fn runtime_log_keeps_only_last_3000_entries() {
+fn runtime_log_trims_periodically_to_last_3000_entries() {
     let runtime = Arc::new(FsRuntimeAdapter::new(temp_runtime_root("trim")));
     let adapter = JsonlLogAdapter::new(runtime.clone());
 
-    for index in 0..3005 {
+    let total = MAX_RUNTIME_LOG_ENTRIES + RUNTIME_LOG_TRIM_INTERVAL + 5;
+    for index in 0..total {
         adapter
             .append(sample_event(index))
             .expect("append should succeed");
@@ -94,22 +95,21 @@ fn runtime_log_keeps_only_last_3000_entries() {
     let runtime_raw =
         std::fs::read_to_string(runtime.runtime_log_path()).expect("read runtime log");
     let runtime_lines: Vec<&str> = runtime_raw.lines().collect();
-    assert_eq!(runtime_lines.len(), MAX_RUNTIME_LOG_ENTRIES);
+    assert!(runtime_lines.len() <= MAX_RUNTIME_LOG_ENTRIES + RUNTIME_LOG_TRIM_INTERVAL);
     let runtime_items: Vec<LogEvent> = runtime_lines
         .iter()
         .map(|line| serde_json::from_str(line).expect("parse runtime log event"))
         .collect();
-    assert_eq!(runtime_items[0].message, "message-5");
     assert_eq!(
         runtime_items
             .last()
             .expect("runtime log should not be empty")
             .message,
-        "message-3004"
+        format!("message-{}", total - 1)
     );
 
     let events_raw = std::fs::read_to_string(runtime.events_log_path()).expect("read events log");
-    assert_eq!(events_raw.lines().count(), 3005);
+    assert_eq!(events_raw.lines().count(), total);
 
     let _ = std::fs::remove_dir_all(runtime.runtime_root());
 }

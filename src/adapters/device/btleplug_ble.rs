@@ -177,9 +177,30 @@ impl LightDevice for BtleplugBleAdapter {
     }
 
     async fn health(&self) -> DeviceHealth {
-        // health 只暴露本 adapter 当前缓存的快照，不做额外 IO，
-        // 避免 `status` 命令反过来触发新的蓝牙读写行为。
-        self.health.clone()
+        // status 路径需要尽量反映真实连接状态，因此这里做一次轻量的
+        // `is_connected()` 探测；其它诸如最近写入模式、设备名仍沿用缓存快照。
+        let mut health = self.health.clone();
+        match &self.peripheral {
+            Some(peripheral) => match peripheral.is_connected().await {
+                Ok(connected) => {
+                    health.connected = connected && self.characteristic.is_some();
+                    if connected {
+                        health.last_error = None;
+                    } else if health.last_error.is_none() {
+                        health.last_error =
+                            Some("ble_disconnected: peripheral is not connected".into());
+                    }
+                }
+                Err(err) => {
+                    health.connected = false;
+                    health.last_error = Some(format!("ble_health_failed: {err}"));
+                }
+            },
+            None => {
+                health.connected = false;
+            }
+        }
+        health
     }
 }
 

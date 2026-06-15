@@ -1,13 +1,14 @@
 //! Claude Hook 安装器。
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::adapters::install::{codex_like_uninstall, install_codex_like_hooks};
+use crate::adapters::install::{codex_like_uninstall, install_codex_like_hooks, send_hook_spec};
 use crate::adapters::platform::user_home_dir;
-use crate::model::{AppResult, HookCommand, HookSpec, InstallScope, Mode};
+#[cfg(test)]
+use crate::model::HookCommand;
+use crate::model::{AppResult, HookSpec, InstallScope, Mode};
 use crate::ports::hook_install::HookInstallAdapter;
 use crate::ports::platform::PlatformAdapter;
 
@@ -84,30 +85,7 @@ impl HookInstallAdapter for ClaudeInstallAdapter {
 fn spec(exe: &Path, event: &str, matcher: Option<&str>, mode: Mode, ttl: u64) -> HookSpec {
     // Claude 的每条规则同样只表达“事件 -> esp send 命令”，
     // 由公共 helper 再翻译成宿主要求的 hooks 数组结构。
-    HookSpec {
-        target: "claude".into(),
-        event: event.into(),
-        matcher: matcher.map(ToOwned::to_owned),
-        fallback_mode: mode,
-        ttl: Duration::from_secs(ttl),
-        command: HookCommand {
-            exe: exe.to_path_buf(),
-            args: vec![
-                "send".into(),
-                "--mode".into(),
-                mode.as_str().into(),
-                "--source".into(),
-                "claude".into(),
-                "--session".into(),
-                "auto".into(),
-                "--ttl".into(),
-                ttl.to_string(),
-                "--quiet".into(),
-                "--hook-id".into(),
-                "agent-status-light".into(),
-            ],
-        },
-    }
+    send_hook_spec("claude", exe, event, matcher, mode, ttl)
 }
 
 // 测试实现拆到独立目录，避免与 Claude Hook 安装逻辑混写在同一个文件里。

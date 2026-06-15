@@ -245,8 +245,10 @@ fn clear_stale_daemon_runtime_markers(ctx: &AppContext, stale_pid: Option<(u32, 
 
 fn clear_stale_daemon_startup_lock(ctx: &AppContext, stale_pid: Option<(u32, bool)>) {
     let lock_path = ctx.runtime.runtime_dir().join("daemon.lock");
-    // 这里只在“确认 IPC 不可用、准备重新 spawn”这条恢复路径上调用。
-    // 因此可以保守地删除 daemon.lock：如果真有健康 daemon 存在，前面的 status RPC 已经提前返回了。
+    let Some(reason) = stale_startup_lock_reason(&lock_path, stale_pid) else {
+        return;
+    };
+
     let removed = match fs::remove_file(&lock_path) {
         Ok(()) => true,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
@@ -266,6 +268,7 @@ fn clear_stale_daemon_startup_lock(ctx: &AppContext, stale_pid: Option<(u32, boo
                 mode: None,
                 context: Some(json!({
                     "lock_path": lock_path,
+                    "reason": reason,
                     "stale_pid": stale_pid.map(|(pid, alive)| json!({
                         "pid": pid,
                         "alive": alive,
@@ -273,6 +276,30 @@ fn clear_stale_daemon_startup_lock(ctx: &AppContext, stale_pid: Option<(u32, boo
                 })),
             },
         );
+    }
+}
+
+fn stale_startup_lock_reason(
+    lock_path: &std::path::Path,
+    stale_pid: Option<(u32, bool)>,
+) -> Option<&'static str> {
+    let raw = match fs::read_to_string(lock_path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(_) => return Some("startup_lock_unreadable"),
+    };
+    let owner_pid = match raw.trim().parse::<u32>() {
+        Ok(pid) => pid,
+        Err(_) => return Some("startup_lock_corrupted"),
+    };
+    if matches!(stale_pid, Some((pid, false)) if pid == owner_pid) {
+        return Some("startup_lock_matches_dead_daemon_pid");
+    }
+
+    match process_is_alive(owner_pid) {
+        Ok(false) => Some("startup_lock_owner_dead"),
+        Ok(true) => None,
+        Err(_) => None,
     }
 }
 

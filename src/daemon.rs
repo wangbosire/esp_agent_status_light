@@ -624,9 +624,29 @@ impl Daemon {
             })),
         });
         let now = Utc::now();
-        let effective = {
+        let apply_result = {
             let mut router = self.router.lock().await;
             router.apply_send(&payload, now)
+        };
+        let effective = match apply_result {
+            Ok(effective) => effective,
+            Err(err) => {
+                self.append_runtime_log(RuntimeLogEvent {
+                    kind: "runtime_router",
+                    phase: "router.state_rejected",
+                    message: "router rejected state update",
+                    code: Some(&err.code),
+                    source: Some(&payload.source),
+                    session: Some(&payload.session),
+                    mode: Some(payload.mode),
+                    context: Some(json!({
+                        "request_id": request_id,
+                        "error_code": err.code,
+                        "error_message": err.message,
+                    })),
+                });
+                return IpcResponseEnvelope::error(request_id.to_string(), &err);
+            }
         };
         self.append_runtime_log(RuntimeLogEvent {
             kind: "runtime_router",

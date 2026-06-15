@@ -5,6 +5,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use std::fs::OpenOptions;
+use std::io::Write;
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -176,6 +178,50 @@ impl LightDevice for SlowConnectDevice {
     }
 }
 
+#[derive(Debug, Default)]
+struct IdleRefreshDeviceState {
+    connect_calls: usize,
+    writes: Vec<Mode>,
+}
+
+struct IdleRefreshDevice {
+    state: Arc<Mutex<IdleRefreshDeviceState>>,
+}
+
+#[async_trait]
+impl LightDevice for IdleRefreshDevice {
+    async fn connect(&mut self) -> AppResult<DeviceInfo> {
+        let mut state = self.state.lock().await;
+        state.connect_calls += 1;
+        Ok(DeviceInfo {
+            name: "idle-refresh-device".into(),
+            id: "idle-refresh".into(),
+        })
+    }
+
+    async fn write_mode(&mut self, mode: Mode) -> AppResult<()> {
+        let mut state = self.state.lock().await;
+        state.writes.push(mode);
+        Ok(())
+    }
+
+    async fn read_mode(&mut self) -> AppResult<Option<Mode>> {
+        let state = self.state.lock().await;
+        Ok(state.writes.last().copied())
+    }
+
+    async fn health(&self) -> DeviceHealth {
+        let state = self.state.lock().await;
+        DeviceHealth {
+            connected: state.connect_calls > 0,
+            device_name: Some("idle-refresh-device".into()),
+            last_error: None,
+            last_write_at: None,
+            last_mode: state.writes.last().copied(),
+        }
+    }
+}
+
 struct ReadySignalServer {
     serve_started_tx: Mutex<Option<oneshot::Sender<()>>>,
 }
@@ -290,6 +336,7 @@ impl EventLog for TestEventLog {
 }
 
 fn build_daemon(device_state: Arc<Mutex<DeviceState>>) -> Arc<Daemon> {
+    // 大多数测试只关心 daemon 状态流转，因此统一复用这套最小可观测 fake 依赖装配。
     Daemon::new(
         Arc::new(TestRuntimeStore),
         Arc::new(TestEventLog),
@@ -314,6 +361,7 @@ fn build_hanging_write_daemon(
 }
 
 fn send_payload(mode: Mode) -> SendPayload {
+    // 统一 helper 能避免各测试在 source/session/hook_id 这些样板字段上重复展开。
     SendPayload {
         mode,
         source: "codex".into(),
@@ -660,6 +708,84 @@ async fn daemon_status_is_ready_while_initial_connect_is_still_running() {
         .await
         .expect("daemon task should join")
         .expect("daemon should stop cleanly");
+
+    let _ = std::fs::remove_dir_all(runtime_root);
+}
+
+#[tokio::test]
+async fn idle_connection_refreshes_before_next_write() {
+    let runtime_root = temp_runtime_root("idle-refresh");
+    let runtime: Arc<dyn RuntimeStore> = Arc::new(FsRuntimeAdapter::new(runtime_root.clone()));
+    let device_state = Arc::new(Mutex::new(IdleRefreshDeviceState::default()));
+    let daemon = Daemon::new(
+        runtime.clone(),
+        Arc::new(TestEventLog),
+        Box::new(IdleRefreshDevice {
+            state: device_state.clone(),
+        }),
+    );
+
+    daemon
+        .sync_effective_mode(true)
+        .await
+        .expect("first write should succeed");
+
+    {
+        let mut state = device_state.lock().await;
+        state.connect_calls = 0;
+    }
+    {
+        let mut last = daemon.last_ble_write_at.lock().await;
+        if let Some(old) = *last {
+            *last = Some(old - chrono::Duration::seconds(300));
+        }
+    }
+
+    daemon
+        .sync_effective_mode(false)
+        .await
+        .expect("idle refresh should reconnect before writing");
+
+    let state = device_state.lock().await;
+    assert_eq!(state.connect_calls, 1);
+    assert_eq!(state.writes, vec![Mode::Demo, Mode::Demo]);
+
+    let _ = std::fs::remove_dir_all(runtime_root);
+}
+
+#[tokio::test]
+async fn daemon_autostart_lock_waits_long_enough_for_existing_owner() {
+    let runtime_root = temp_runtime_root("autostart-lock-wait");
+    let lock_path = runtime_root.join("runtime").join("daemon-autostart.lock");
+    std::fs::create_dir_all(lock_path.parent().expect("runtime dir"))
+        .expect("create runtime dir");
+
+    let holder = std::thread::spawn({
+        let lock_path = lock_path.clone();
+        move || {
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&lock_path)
+                .expect("create lock file");
+            writeln!(file, "{}", std::process::id()).expect("write pid");
+            std::thread::sleep(Duration::from_millis(250));
+            let _ = std::fs::remove_file(lock_path);
+        }
+    });
+
+    std::thread::sleep(Duration::from_millis(20));
+    let started = std::time::Instant::now();
+    let acquired = crate::runtime_lock::FileLock::acquire_with_retry(
+        &lock_path,
+        60,
+        Duration::from_millis(10),
+    )
+    .expect("lock should be acquired after holder releases");
+
+    assert!(started.elapsed() >= Duration::from_millis(200));
+    drop(acquired);
+    holder.join().expect("holder should finish");
 
     let _ = std::fs::remove_dir_all(runtime_root);
 }

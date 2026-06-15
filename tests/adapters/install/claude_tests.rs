@@ -31,6 +31,10 @@ impl PlatformAdapter for TestPlatform {
 
 #[test]
 fn claude_install_generates_post_tool_use_hooks_to_clear_alarm() {
+    // 这组断言同时覆盖：
+    // 1. Claude 三层 hooks 结构是否正确；
+    // 2. alarm 后是否存在把状态推出去的 PostToolUse/PostToolBatch 规则；
+    // 3. 读文件是否按最新规则映射到 ai。
     let adapter = ClaudeInstallAdapter;
     let specs = adapter.hook_specs(Path::new("/tmp/esp"));
     let installed = adapter

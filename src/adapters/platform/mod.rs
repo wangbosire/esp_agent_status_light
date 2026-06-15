@@ -1,10 +1,11 @@
+//! 平台差异适配层公共实现。
+//!
+//! 主要负责 runtime 根目录、shell 引号规则以及后台 daemon 拉起方式等差异，
+//! 让命令层和安装层尽量围绕稳定 trait 协作，而不是到处散落 `cfg` 分支。
+
 pub mod linux;
 pub mod macos;
 pub mod windows;
-
-// 平台差异适配层公共实现。
-//
-// 主要负责 runtime 根目录、shell 引号规则以及后台 daemon 拉起方式等差异。
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -58,6 +59,8 @@ pub(crate) fn unix_runtime_root() -> AppResult<PathBuf> {
 
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn windows_runtime_root() -> AppResult<PathBuf> {
+    // Windows 目录优先级按常见程度排序，
+    // 保证用户环境变量不完整时仍有尽可能高的可恢复概率。
     let appdata = env::var("LOCALAPPDATA")
         .map(StdPathBuf::from)
         .or_else(|_| env::var("APPDATA").map(StdPathBuf::from))
@@ -125,6 +128,7 @@ pub(crate) fn quote_shell_token(value: &str) -> String {
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn quote_windows_token(value: &str) -> String {
     // Windows token 规则和 POSIX 完全不同，因此必须单独维护引用逻辑。
+    // 这里采用偏保守策略：能直出就直出，剩余情况统一走双引号包裹。
     if value
         .chars()
         .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '/' | '\\' | '.' | ':'))

@@ -1,4 +1,9 @@
 //! Unix Domain Socket IPC 实现。
+//!
+//! 这是 Unix/macOS 默认使用的本地 IPC 方案，特点是：
+//! 1. 不暴露网络端口；
+//! 2. 请求-响应模型简单；
+//! 3. 与 runtime 目录里的 socket 文件天然绑定，便于排障。
 
 use std::path::PathBuf;
 use std::sync::Arc;

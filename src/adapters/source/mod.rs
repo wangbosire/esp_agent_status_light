@@ -1,12 +1,12 @@
+//! Hook 来源解析公共辅助。
+//!
+//! 每个宿主工具的 source adapter 只负责识别“这条事件表示什么”，
+//! 这里则集中处理 session/cwd/raw_event/turn 等通用字段提取和事件组装。
+
 pub mod claude;
 pub mod codex;
 pub mod cursor;
 pub mod fallback;
-
-// 各类 Hook 来源解析器的公共辅助逻辑。
-//
-// 这里集中封装字段兼容、session 推导和通用 `AgentEvent` 构造，
-// 避免不同来源各自实现一套近似但细节不一致的逻辑。
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -95,11 +95,15 @@ pub fn extract_cwd(input: &Value) -> Option<PathBuf> {
 }
 
 /// 提取宿主工具的原始事件名。
+///
+/// 这个字段主要用于日志与排障展示，不应该被 daemon/router 当成稳定业务语义直接依赖。
 pub fn extract_raw_event(input: &Value) -> Option<String> {
     string_field(input, &["hook_event_name", "hookEventName"])
 }
 
 /// 提取宿主工具的原始工具名。
+///
+/// 与 `raw_event` 一样，它更多是面向排障上下文，而不是核心决策输入。
 pub fn extract_raw_tool(input: &Value) -> Option<String> {
     string_field(input, &["tool_name", "toolName"])
 }

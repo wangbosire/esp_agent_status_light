@@ -33,6 +33,9 @@ impl FsRuntimeAdapter {
         self.runtime_dir().join("ipc.json")
     }
 
+    /// 以“写临时文件再替换”的方式原子更新小型 runtime 文件。
+    ///
+    /// 这些文件通常会被 CLI 和 daemon 并发读写，因此尽量避免留下半写状态。
     fn write_atomic(&self, path: PathBuf, raw: String, context: &str) -> AppResult<()> {
         // 先写临时文件，再替换目标文件，避免异常中断时留下半写内容。
         let tmp_path = path.with_extension(format!(
@@ -150,6 +153,9 @@ impl RuntimeStore for FsRuntimeAdapter {
     }
 }
 
+/// 在不同平台上尽量稳定地用 `from` 覆盖 `to`。
+///
+/// 某些平台 `rename` 到已存在目标时会直接失败，因此这里在必要时手动删除旧文件重试。
 fn replace_file(from: &Path, to: &Path, context: &str) -> AppResult<()> {
     match fs::rename(from, to) {
         Ok(()) => Ok(()),

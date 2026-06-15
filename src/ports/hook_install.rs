@@ -49,6 +49,9 @@ impl HookInstallRegistry {
     }
 
     /// 注册一个安装器实现。
+    ///
+    /// 使用链式 builder 写法，既方便默认注册表在一处集中声明，
+    /// 也方便测试里临时替换某个宿主的安装器实现。
     pub fn with<A>(mut self, adapter: A) -> Self
     where
         A: HookInstallAdapter + 'static,

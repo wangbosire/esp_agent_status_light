@@ -24,6 +24,9 @@ struct ClaudeHookInput {
 }
 
 /// Claude Hook 解析器。
+///
+/// Claude 的结束类/通知类事件和其它宿主差异较大，
+/// 因此这里保留独立映射，而不是完全复用别家的规则。
 pub struct ClaudeAdapter;
 
 impl SourceAdapter for ClaudeAdapter {
@@ -105,6 +108,9 @@ fn map_claude_mode(
     }
 }
 
+/// 将 Claude 原始事件映射为统一流程语义。
+///
+/// 这里和 mode 映射分开维护，避免以后调整视觉状态时意外影响状态覆盖规则。
 fn semantics_for_claude(
     raw_event: Option<&str>,
     tool_name: Option<&str>,

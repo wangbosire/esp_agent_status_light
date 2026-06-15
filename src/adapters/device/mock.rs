@@ -11,6 +11,8 @@ pub struct MockLightDevice {
     /// 是否已经过 connect。
     connected: bool,
     /// 最近一次写入的模式。
+    ///
+    /// 这让测试不需要真的读硬件回显，也能断言 daemon 最终尝试写了什么。
     mode: Option<Mode>,
 }
 

@@ -36,6 +36,19 @@ const DEVICE_WRITE_TIMEOUT: Duration = Duration::from_millis(80);
 #[cfg(not(test))]
 const DEVICE_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// 判定“连接已经闲置太久、下次写前应主动刷新”的阈值。
+///
+/// 这个阈值的目标不是替代底层蓝牙栈的 keepalive，而是规避一种常见现场问题：
+/// 设备长时间待机后，`health()` 看起来仍是 connected，但第一次真正 `write_mode()`
+/// 会在底层卡住很久，最后才以 `ble_write_timeout` 失败。
+///
+/// 因此这里选择在“上次成功写入已经过去较久”时，主动做一次 reconnect，
+/// 把“陈旧连接”问题前移到写之前处理。
+#[cfg(test)]
+const DEVICE_IDLE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+#[cfg(not(test))]
+const DEVICE_IDLE_REFRESH_INTERVAL: Duration = Duration::from_secs(120);
+
 /// daemon 是唯一持有 LightDevice 的进程。
 /// 所有 Hook 事件都要先经过 IPC 进入这里，再由这里统一做优先级路由和 BLE 写入。
 pub struct Daemon {
@@ -61,6 +74,12 @@ pub struct Daemon {
     /// 进程级启动锁，避免并发 spawn 出多个 daemon。
     startup_lock: Mutex<Option<FileLock>>,
     /// 允许 `&self` 路径安全升级回 `Arc<Self>`，用于后台任务派发。
+    ///
+    /// `IpcRequestHandler::handle()` 只能拿到 `&self`，但某些工作我们希望丢到后台异步执行，
+    /// 例如：路由状态已接受后，再慢慢做 BLE 同步。
+    ///
+    /// 这里保存一个 `Weak<Self>`，让这类路径可以在需要时安全升级成 `Arc<Self>`；
+    /// 若升级失败，说明 daemon 生命周期已经走到尾部，此时请求应该直接返回“当前不可用”。
     self_ref: Weak<Daemon>,
 }
 
@@ -327,9 +346,10 @@ impl Daemon {
     /// `force_write=true` 常用于“刚重连完成后补写当前状态”，
     /// 即使模式没变化也要重新写一次设备，保证灯效和内存状态重新对齐。
     async fn sync_effective_mode(&self, force_write: bool) -> AppResult<()> {
+        let now = Utc::now();
         let effective = {
             let router = self.router.lock().await;
-            router.effective_mode(Utc::now())
+            router.effective_mode(now)
         };
         self.append_runtime_log(RuntimeLogEvent {
             kind: "runtime_ble",
@@ -408,6 +428,51 @@ impl Daemon {
                     return Err(AppError::new(
                         "ble_connect_timeout",
                         "reconnect before write timed out",
+                    ));
+                }
+            }
+        } else if self.is_ble_connection_stale(now).await {
+            self.append_runtime_log(RuntimeLogEvent {
+                kind: "runtime_ble",
+                phase: "ble.reconnect_before_write",
+                message: "device connection looked stale after idle, reconnecting before write",
+                code: None,
+                source: None,
+                session: None,
+                mode: Some(effective),
+                context: Some(json!({
+                    "effective": effective,
+                    "reason": "idle_stale",
+                    "idle_refresh_interval_secs": DEVICE_IDLE_REFRESH_INTERVAL.as_secs(),
+                })),
+            });
+            match timeout(DEVICE_CONNECT_TIMEOUT, device.connect()).await {
+                Ok(Ok(info)) => {
+                    self.update_cached_device_health(|cached| {
+                        cached.connected = true;
+                        cached.device_name = Some(info.name.clone());
+                        cached.last_error = None;
+                    })
+                    .await;
+                }
+                Ok(Err(err)) => {
+                    self.update_cached_device_health(|cached| {
+                        cached.connected = false;
+                        cached.last_error = Some(format!("{}: {}", err.code, err.message));
+                    })
+                    .await;
+                    return Err(err);
+                }
+                Err(_) => {
+                    self.update_cached_device_health(|cached| {
+                        cached.connected = false;
+                        cached.last_error =
+                            Some("ble_connect_timeout: reconnect after idle timed out".into());
+                    })
+                    .await;
+                    return Err(AppError::new(
+                        "ble_connect_timeout",
+                        "reconnect after idle timed out",
                     ));
                 }
             }
@@ -692,17 +757,45 @@ impl Daemon {
         let mut health = self.device_health.lock().await;
         update(&mut health);
     }
+
+    /// 判断当前 BLE 连接是否已经“闲置过久，值得在写前主动刷新”。
+    ///
+    /// 这里并不试图证明连接“必然坏了”，而是做一个启发式判断：
+    /// - 如果从未成功写过 BLE，则不做 idle refresh；
+    /// - 如果最近刚写成功，也不额外 reconnect；
+    /// - 只有“连接看起来还在，但距离上次成功写已经很久”时，才在写前多做一步 connect。
+    ///
+    /// 这么做的好处是把“空闲太久后的第一次写超时”前移为一次更可恢复的 reconnect。
+    async fn is_ble_connection_stale(&self, now: chrono::DateTime<Utc>) -> bool {
+        let Some(last_write_at) = *self.last_ble_write_at.lock().await else {
+            return false;
+        };
+        now.signed_duration_since(last_write_at)
+            .to_std()
+            .ok()
+            .is_some_and(|elapsed| elapsed >= DEVICE_IDLE_REFRESH_INTERVAL)
+    }
 }
 
 struct SendSyncContext {
+    /// 真正执行后台 BLE 同步的 daemon 共享引用。
     daemon: Arc<Daemon>,
+    /// 原始 IPC 请求 ID，便于把后台同步结果和前台 accepted 请求关联起来。
     request_id: String,
+    /// 触发这次同步的来源名。
     source: String,
+    /// 触发这次同步的会话 ID。
     session: String,
+    /// 这次后台同步想要落到设备上的 effective mode。
     effective: Mode,
 }
 
 impl SendSyncContext {
+    /// 在后台执行一次“尽力同步 BLE”。
+    ///
+    /// 语义上，IPC `send` 在路由状态被 daemon 接受后就已经算成功；
+    /// 这里负责的是随后的物理设备副作用，因此即使失败也只写日志和 health，
+    /// 不再反向阻塞或回滚前台请求。
     async fn run(&self) {
         if let Err(err) = self.daemon.sync_effective_mode(false).await {
             self.daemon.append_runtime_log(RuntimeLogEvent {

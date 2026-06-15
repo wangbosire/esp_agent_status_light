@@ -1,13 +1,13 @@
+//! Hook 安装器公共逻辑。
+//!
+//! 这里负责：
+//! 1. 统一注册不同宿主工具安装器；
+//! 2. 判断一条 Hook 是否由本工具写入；
+//! 3. 复用安装/卸载辅助逻辑，尽量在保留用户配置的前提下完成更新。
+
 pub mod claude;
 pub mod codex;
 pub mod cursor;
-
-// Hook 安装器公共逻辑。
-//
-// 这里负责：
-// 1. 统一注册不同宿主工具安装器；
-// 2. 判断一条 Hook 是否由本工具写入；
-// 3. 复用卸载逻辑，确保只删除托管条目，不误伤用户自定义配置。
 
 use serde_json::{Map, Value, json};
 
@@ -139,6 +139,10 @@ fn cursor_uninstall(mut config: Value, hook_id: &str) -> Value {
     config
 }
 
+/// 把一组 Hook 规则写入 Codex / Claude 共用的三层 hooks 结构。
+///
+/// 该 helper 只关注公共 JSON 形状，不关心具体事件语义；
+/// “每个宿主要注册哪些事件”仍由各自安装器定义。
 pub(crate) fn install_codex_like_hooks(
     mut config: Value,
     specs: &[crate::model::HookSpec],
@@ -188,6 +192,7 @@ pub(crate) fn install_codex_like_hooks(
     Ok(config)
 }
 
+/// 把一组 Hook 规则写入 Cursor 风格的扁平 hooks 结构。
 pub(crate) fn install_cursor_like_hooks(
     mut config: Value,
     specs: &[crate::model::HookSpec],

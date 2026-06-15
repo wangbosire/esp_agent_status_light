@@ -1,4 +1,7 @@
 //! Windows 平台适配器。
+//!
+//! Windows 需要同时处理运行目录、命名管道和 hook 命令引用差异，
+//! 因此平台层会在这里集中补齐 `commandWindows` 等宿主兼容字段。
 
 use std::path::{Path, PathBuf};
 

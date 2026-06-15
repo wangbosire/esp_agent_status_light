@@ -1,4 +1,9 @@
 //! macOS 平台适配器。
+//!
+//! 当前 macOS 是主要目标平台之一，因此默认走：
+//! 1. `~/.esp-agent-status-light` runtime 根目录；
+//! 2. Unix socket IPC；
+//! 3. POSIX shell 风格 hook 命令拼装。
 
 use std::path::{Path, PathBuf};
 

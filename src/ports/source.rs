@@ -44,6 +44,9 @@ impl SourceAdapterRegistry {
     }
 
     /// 根据来源名获取对应解析器。
+    ///
+    /// 这里返回 `Option` 而不是直接报错，是因为命令层允许“未知来源 -> fallback”
+    /// 的宽容路径存在。
     pub fn get(&self, source: &str) -> Option<Arc<dyn SourceAdapter>> {
         self.adapters.get(source).cloned()
     }

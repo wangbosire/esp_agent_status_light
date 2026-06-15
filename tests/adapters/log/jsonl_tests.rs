@@ -11,12 +11,14 @@ use crate::adapters::runtime::fs::FsRuntimeAdapter;
 use crate::model::Mode;
 
 fn temp_runtime_root(name: &str) -> PathBuf {
+    // 用带 pid 的临时目录避免并发测试之间互相污染同一份日志文件。
     let root = std::env::temp_dir().join(format!("esp-jsonl-log-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     root
 }
 
 fn sample_event(index: usize) -> LogEvent {
+    // 生成结构完整的样例事件，便于同时覆盖北京时间序列化和上下文字段落盘。
     LogEvent {
         timestamp: Utc::now(),
         level: "info".into(),
@@ -50,7 +52,9 @@ fn append_writes_both_events_and_runtime_logs() {
     let runtime_raw =
         std::fs::read_to_string(runtime.runtime_log_path()).expect("read runtime log");
     assert!(events_raw.contains("message-1"));
+    assert!(events_raw.contains("+08:00"));
     assert!(runtime_raw.contains("message-1"));
+    assert!(runtime_raw.contains("+08:00"));
     assert!(runtime_raw.contains("\"phase\":\"test.phase\""));
     assert!(runtime_raw.contains("\"hook_event\":\"PreToolUse\""));
 

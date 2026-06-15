@@ -31,6 +31,8 @@ impl PlatformAdapter for TestPlatform {
 
 #[test]
 fn codex_install_generates_green_session_start_hook() {
+    // 重点验证 Codex 安装结果里的三件事：
+    // 会话开始亮绿、读文件进入 ai、以及每条 hook 都显式声明 type=command。
     let adapter = CodexInstallAdapter;
     let specs = adapter.hook_specs(Path::new("/tmp/esp"));
     let installed = adapter

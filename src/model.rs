@@ -414,6 +414,10 @@ pub struct DeviceHealth {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEvent {
     /// 日志写入时间。
+    ///
+    /// 内部一律继续使用 `Utc` 保存，保证状态计算、TTL 和测试比较逻辑不受宿主机时区影响；
+    /// 但对外序列化到 JSONL 时会统一转换为北京时间字符串，降低人工排障时的换算成本。
+    #[serde(with = "crate::model::beijing_time")]
     pub timestamp: DateTime<Utc>,
     /// 日志等级，目前主要是 `info` / `warn`。
     pub level: String,
@@ -484,6 +488,54 @@ impl RuntimeLogEvent<'_> {
             mode: self.mode,
             context: self.context,
         }
+    }
+}
+
+/// `DateTime<Utc>` 与“日志对外展示用北京时间字符串”之间的桥接序列化模块。
+///
+/// 设计上我们刻意不把核心模型字段直接改成 `FixedOffset` 或 `Local`，原因是：
+/// 1. router / daemon / TTL 计算更适合围绕 UTC 保持稳定；
+/// 2. 测试环境、CI 机器和用户机器的本地时区可能不同，不适合把业务逻辑绑到宿主时区；
+/// 3. 真正需要北京时间的主要是 JSONL 日志的人类可读输出，而不是内部计算。
+///
+/// 因此这里采用“内部 UTC，序列化时转 +08:00，反序列化再转回 UTC”的折中方案。
+pub(crate) mod beijing_time {
+    use chrono::{DateTime, FixedOffset, Utc};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    /// 北京时间固定 UTC+8 偏移量，单位为秒。
+    const BEIJING_OFFSET: i32 = 8 * 3600;
+
+    /// 返回北京时间的固定时区对象。
+    ///
+    /// 使用固定偏移而非 `Local`，是为了避免受宿主机器时区设置影响。
+    fn beijing_offset() -> FixedOffset {
+        FixedOffset::east_opt(BEIJING_OFFSET).expect("valid beijing offset")
+    }
+
+    /// 将内部 UTC 时间编码成带 `+08:00` 的 RFC3339 字符串。
+    pub fn serialize<S>(value: &DateTime<Utc>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        value
+            .with_timezone(&beijing_offset())
+            .to_rfc3339()
+            .serialize(serializer)
+    }
+
+    /// 将日志里的 RFC3339 时间字符串重新解析回 UTC。
+    ///
+    /// 这样 `EventLog::tail()` 读回来的依旧是 UTC 语义，
+    /// 上层调用方不需要为“日志文件是北京时间”再额外做时区分支。
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        DateTime::parse_from_rfc3339(&value)
+            .map(|dt| dt.with_timezone(&Utc))
+            .map_err(serde::de::Error::custom)
     }
 }
 

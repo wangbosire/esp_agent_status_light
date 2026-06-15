@@ -11,6 +11,17 @@ use crate::model::{
 use crate::ports::runtime::RuntimeStore;
 use crate::runtime_lock::{FileLock, process_is_alive};
 
+/// daemon 自启动锁的最大重试次数。
+///
+/// 600 * 10ms ≈ 6s。
+/// 这个窗口比 daemon ready 探测的 3s 略长，目的是让并发 Hook 在“已经有人负责启动”的情况下
+/// 更倾向于排队等待同一轮启动完成，而不是因为只晚到几百毫秒就直接报 `lock_timeout`。
+const DAEMON_AUTOSTART_LOCK_RETRY_ATTEMPTS: usize = 600;
+/// daemon 自启动锁的单次重试间隔。
+///
+/// 保持 10ms 能让等待方足够快地观察到锁释放，又不至于在高并发下疯狂忙轮询。
+const DAEMON_AUTOSTART_LOCK_RETRY_DELAY: Duration = Duration::from_millis(10);
+
 /// 先尝试直接请求 daemon；失败时自动拉起并重试一次。
 ///
 /// 这样用户第一次执行 `esp send` 时不必先手动启动 daemon，
@@ -89,8 +100,18 @@ pub(super) async fn ensure_daemon_running(ctx: &AppContext) -> AppResult<()> {
     let lock_path = ctx.runtime.runtime_dir().join("daemon-autostart.lock");
     // 用跨进程锁串行化“检查 -> 清理 stale pid -> spawn”的整段流程，
     // 避免多个 CLI/Hook 同时认为 daemon 不在，然后各自拉起一份后台进程。
-    let _guard = FileLock::acquire(lock_path)?;
+    // Hook 高并发风暴里会同时有很多 send 落到这里：
+    // 比起让后到请求在 200ms 内直接报 lock_timeout，更合理的是排队等待
+    // 已有的 daemon 启动流程完成，再复用它。
+    let _guard = FileLock::acquire_with_retry(
+        lock_path,
+        DAEMON_AUTOSTART_LOCK_RETRY_ATTEMPTS,
+        DAEMON_AUTOSTART_LOCK_RETRY_DELAY,
+    )?;
 
+    // 拿到串行化锁之后，第一件事永远是再探测一次 daemon 是否已经 ready。
+    // 这样可以覆盖“我在等待锁时，前一个请求已经把 daemon 启好了”的情况，
+    // 避免无意义地继续走 stale pid 清理和重复 spawn。
     if daemon_ipc_ready(ctx).await {
         append_runtime_log(
             ctx.log.as_ref(),
@@ -210,6 +231,12 @@ pub(super) async fn ensure_daemon_running(ctx: &AppContext) -> AppResult<()> {
     ))
 }
 
+/// 使用统一的 `status` RPC 判断 daemon IPC 是否已经 ready。
+///
+/// 这里刻意不引入额外探活协议，而是直接复用最轻量的业务无副作用请求：
+/// - ready 的定义与真实调用方保持一致；
+/// - 不需要再维护一套“启动中但不一定可用”的旁路状态；
+/// - 若 transport / socket / handler 任一环节没就绪，都会自然返回 false。
 async fn daemon_ipc_ready(ctx: &AppContext) -> bool {
     // 就绪探测统一走最轻量的 `status` 请求，避免引入额外探活协议。
     let probe = IpcRequestEnvelope::new(IpcRequestPayload::Status { verbose: false });

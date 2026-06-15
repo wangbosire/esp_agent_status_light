@@ -1,4 +1,8 @@
 //! Windows Named Pipe IPC 实现。
+//!
+//! Windows 上没有 Unix socket，因此默认本地 IPC 走 named pipe。
+//! 这一实现尽量与 Unix/TCP 版本保持同样的“单行 JSON 请求-响应”协议，
+//! 这样 daemon 和命令层可以复用同一套 envelope 与错误语义。
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -207,6 +211,7 @@ fn sanitize_pipe_component(value: &str) -> String {
 const ERROR_PIPE_BUSY_CODE: i32 = 231;
 
 #[cfg(windows)]
+/// 连接到服务端 named pipe，并在启动窗口期对“暂时不可连接”做短重试。
 async fn open_client_with_retry(
     pipe_name: &str,
 ) -> AppResult<tokio::net::windows::named_pipe::NamedPipeClient> {

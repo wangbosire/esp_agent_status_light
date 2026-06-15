@@ -35,6 +35,9 @@ struct CursorHookInput {
 }
 
 /// Cursor Hook 解析器。
+///
+/// Cursor 的事件命名和字段风格更偏 camelCase，并且把“读文件/回正文/执行 shell”
+/// 拆得更细，因此适合在 adapter 层显式做一遍语义归一。
 pub struct CursorAdapter;
 
 impl SourceAdapter for CursorAdapter {
@@ -118,6 +121,7 @@ fn map_cursor_mode(
     }
 }
 
+/// 将 Cursor 原始事件映射为统一流程语义。
 fn semantics_for_cursor(
     raw_event: Option<&str>,
     tool_name: Option<&str>,

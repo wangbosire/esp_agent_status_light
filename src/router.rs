@@ -42,6 +42,9 @@ pub fn resolve_mode(ctx: &HookParseContext, event: &AgentEvent) -> Mode {
 #[derive(Debug, Default)]
 pub struct StateRouter {
     /// 以 `(source, session)` 为键保存每个来源当前的有效状态。
+    ///
+    /// 这里刻意不把 `turn` 作为 map key 的一部分，因为同一 session 内的新状态
+    /// 本来就应该覆盖旧状态；`turn` 主要用于更细粒度的覆盖判断和状态解释。
     states: HashMap<(String, String), SourceState>,
     /// `manual off` 触发后，需要在“没有任何状态”时保持熄灯，而不是退回 demo。
     /// 一旦后续收到新的非 off 状态，这个开关就会被清掉。
@@ -62,6 +65,9 @@ impl StateRouter {
         let key = (payload.source.clone(), payload.session.clone());
 
         if payload.mode == Mode::Off {
+            // `manual/manual + off` 是一个全局语义：
+            // 它不只是“移除某个 session 的状态”，而是主动清空当前展示并保持熄灯，
+            // 直到后续收到新的非 off 状态。
             if payload.source == "manual" && payload.session == "manual" {
                 self.states.clear();
                 self.manual_hold_off = true;
@@ -73,6 +79,10 @@ impl StateRouter {
 
         self.manual_hold_off = false;
 
+        // TTL 的来源优先级是：
+        // 1. send 命令显式传入；
+        // 2. 各模式自己的默认 TTL。
+        // 这样既保留人工覆盖能力，又不需要每个来源 adapter 都自己决定存活时长。
         let ttl = payload
             .ttl
             .map(|ttl| ChronoDuration::seconds(ttl as i64))
@@ -243,6 +253,8 @@ fn should_preserve_ai_generation_state(current: &SourceState, candidate: &Source
     }
 
     // 只有“没有明确工具边界的 continuation”才不应冲掉 ai。
+    // 一旦新事件明确描述了真正的命令执行工具（例如 Bash / Shell），
+    // 上层 adapter 就应该把它映射为更具体的语义，此时该保护不会生效。
     candidate.capability == Some(AgentCapability::RunningCommand)
         && candidate.semantics == EventSemantics::Continuation
 }

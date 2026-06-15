@@ -31,6 +31,8 @@ impl PlatformAdapter for TestPlatform {
 
 #[test]
 fn cursor_install_generates_expected_shell_hook() {
+    // Cursor 采用扁平 hooks 结构，这里验证 shell / read / response / edit 几类关键事件
+    // 是否都被正确写成命令条目。
     let adapter = CursorInstallAdapter;
     let specs = adapter.hook_specs(Path::new("/tmp/esp"));
     let installed = adapter

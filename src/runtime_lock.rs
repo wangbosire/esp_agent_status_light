@@ -21,10 +21,36 @@ pub struct FileLock {
 }
 
 impl FileLock {
+    /// 使用默认重试策略获取文件锁。
+    ///
+    /// 这条路径适合“临界区本来就非常短”的场景，例如：
+    /// - runtime.log / events.log 逐行追加；
+    /// - daemon 进程内的 startup_lock；
+    /// - 安装器里原子替换稳定二进制前的短暂串行化。
+    ///
+    /// 默认窗口故意保持很短，避免真正的死锁或意外长时间占锁时，
+    /// 调用方无感知地卡住太久。
     pub fn acquire(path: impl AsRef<Path>) -> AppResult<Self> {
+        Self::acquire_with_retry(path, 20, Duration::from_millis(10))
+    }
+
+    /// 使用调用方指定的重试窗口获取文件锁。
+    ///
+    /// 之所以单独暴露这个接口，是因为不同锁的“等多久才合理”差异很大：
+    /// - 日志热路径希望尽快失败，避免反过来拖慢主功能；
+    /// - daemon-autostart.lock 则更适合等待更久，让并发 Hook 复用同一轮启动流程。
+    ///
+    /// 这个接口只负责“等待并拿到锁”，不会额外理解锁的业务语义；
+    /// 调用方需要根据具体场景选择合适的 `max_attempts` 和 `retry_delay`。
+    pub fn acquire_with_retry(
+        path: impl AsRef<Path>,
+        max_attempts: usize,
+        retry_delay: Duration,
+    ) -> AppResult<Self> {
         let path = path.as_ref().to_path_buf();
-        // 重试窗口保持很短，因为调用点本身都是启动/安装/日志这种小临界区。
-        for _ in 0..20 {
+        // 这里统一采用“固定次数 + 固定间隔”的重试模型：
+        // 简单、可预期，而且足以覆盖本项目当前这些非常轻量的临界区。
+        for _ in 0..max_attempts {
             match OpenOptions::new().create_new(true).write(true).open(&path) {
                 Ok(mut file) => {
                     // 锁文件内容记录持有者 pid，便于下次启动时判断是否为僵尸锁。
@@ -48,7 +74,7 @@ impl FileLock {
                         }
                     }
                     // 当前确实有活着的持有者时，短暂等待后重试。
-                    thread::sleep(Duration::from_millis(10));
+                    thread::sleep(retry_delay);
                 }
                 Err(err) => return Err(AppError::io("acquire file lock", err)),
             }
@@ -102,6 +128,8 @@ pub fn process_is_alive(pid: u32) -> AppResult<bool> {
 
 fn stale_lock_owner(path: &Path) -> AppResult<bool> {
     // 锁文件的唯一语义就是“里面记录了持锁 pid”，因此这里只解析这一项。
+    // 如果文件内容不是合法 PID，调用方会把它视为损坏锁并移除，
+    // 这样可以避免一份脏数据永久卡死整个链路。
     let raw = fs::read_to_string(path).map_err(|err| AppError::io("read file lock pid", err))?;
     let pid = raw
         .trim()

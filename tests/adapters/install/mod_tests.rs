@@ -10,6 +10,7 @@ use crate::ports::platform::PlatformAdapter;
 
 #[test]
 fn cursor_uninstall_removes_managed_entries_only() {
+    // 卸载必须只删掉自身命令，不能把同组里的用户自定义命令一起删掉。
     let config = json!({
         "version": 1,
         "hooks": {
@@ -29,6 +30,7 @@ fn cursor_uninstall_removes_managed_entries_only() {
 
 #[test]
 fn codex_like_uninstall_keeps_user_hooks_in_same_group() {
+    // Codex/Claude 的 matcher-group 结构更深，这里验证组内的非托管 hook 仍会被保留。
     let config = json!({
         "hooks": {
             "PreToolUse": [
@@ -87,6 +89,8 @@ impl PlatformAdapter for TestPlatform {
 
 #[test]
 fn decorate_command_fields_adds_windows_overrides_only_when_needed() {
+    // 平台层决定实际写哪些命令字段；
+    // 公共安装 helper 只负责调用，不自己猜 Windows 兼容字段规则。
     let mut value = json!({});
     let command = HookCommand {
         exe: PathBuf::from("/tmp/esp"),
@@ -111,6 +115,7 @@ fn decorate_command_fields_adds_windows_overrides_only_when_needed() {
 
 #[test]
 fn codex_like_install_recovers_from_non_object_shapes() {
+    // 用户已有配置局部损坏时，安装路径应优先“修复成可写结构”而不是直接失败。
     let specs = vec![crate::model::HookSpec {
         target: "codex".into(),
         event: "SessionStart".into(),
@@ -142,6 +147,7 @@ fn codex_like_install_recovers_from_non_object_shapes() {
 
 #[test]
 fn cursor_like_install_recovers_from_non_array_shapes() {
+    // Cursor 的扁平数组结构同样要支持从损坏配置中恢复。
     let specs = vec![crate::model::HookSpec {
         target: "cursor".into(),
         event: "sessionStart".into(),

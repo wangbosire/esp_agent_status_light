@@ -18,7 +18,7 @@ use crate::ports::ipc::{IpcRequestHandler, IpcServer, IpcTransport};
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct TcpLoopbackTransport {
-    /// 监听地址，例如 `127.0.0.1:NNNN`。
+    /// 目标回环地址，例如 `127.0.0.1:NNNN`。
     addr: SocketAddr,
 }
 
@@ -63,7 +63,7 @@ impl IpcTransport for TcpLoopbackTransport {
 
 #[allow(dead_code)]
 pub struct TcpLoopbackServer {
-    /// 监听地址。
+    /// 服务端监听地址。
     addr: SocketAddr,
 }
 

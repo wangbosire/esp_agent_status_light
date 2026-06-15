@@ -48,6 +48,11 @@ pub enum CommandOutput {
     Silent,
 }
 
+/// `send` 命令在进入核心逻辑前归一后的参数视图。
+///
+/// 单独抽出这个结构而不是在 `run_send()` 里直接传一长串参数，有两个目的：
+/// 1. 让命令分发层到实现层的边界更清晰；
+/// 2. 后续扩展 `send` 选项时，不必持续膨胀函数签名。
 struct SendCommandArgs {
     explicit_mode: Mode,
     source: String,
@@ -175,6 +180,8 @@ fn append_runtime_log(log: &dyn EventLog, event: RuntimeLogEvent<'_>) {
 }
 
 async fn run_daemon(ctx: AppContext, foreground: bool) -> AppResult<CommandOutput> {
+    // `esp daemon` 同时承担“启动后台服务”和“真正运行 daemon 主循环”两种职责；
+    // 是否进入主循环完全由 `foreground` 决定。
     if !foreground {
         // 非前台模式只负责拉起后台 daemon，自身立即退出。
         append_runtime_log(
@@ -339,6 +346,7 @@ async fn run_send(ctx: AppContext, args: SendCommandArgs) -> AppResult<CommandOu
 
     // 最终 mode 的决策顺序必须固定：
     // manual -> explicit off -> suggested_mode -> capability 映射 -> explicit_mode 兜底。
+    // 这样来源 adapter 只负责“尽量识别语义”，而不是各自决定最终灯效。
     let resolved_mode = resolve_mode(&ctx_parse, &event);
     let resolved_session = if args.session == "auto" {
         event.session.clone()
@@ -473,6 +481,7 @@ async fn run_send(ctx: AppContext, args: SendCommandArgs) -> AppResult<CommandOu
 /// 否则这里会把错误降级为静默或 warning 文本。
 fn handle_send_failure(err: AppError, quiet: bool, strict: bool) -> AppResult<CommandOutput> {
     // Hook 默认是“失败不阻塞主流程”，只有 `--strict` 才把错误向上抛出。
+    // 这样灯效链路的问题不会轻易反向影响用户真正要执行的任务。
     if strict {
         return Err(err);
     }
@@ -488,6 +497,8 @@ fn handle_send_failure(err: AppError, quiet: bool, strict: bool) -> AppResult<Co
 }
 
 async fn run_status(ctx: AppContext, verbose: bool) -> AppResult<CommandOutput> {
+    // status 优先读取 daemon 实时状态；
+    // 如果 daemon 不在，则退回一个稳定的“stopped”响应结构，方便脚本和人类统一消费。
     let request = IpcRequestEnvelope::new(IpcRequestPayload::Status { verbose });
     match ctx.ipc_client().request(request).await {
         Ok(response) if response.ok => Ok(CommandOutput::Json(
@@ -511,6 +522,7 @@ async fn run_status(ctx: AppContext, verbose: bool) -> AppResult<CommandOutput> 
 
 async fn run_logs(ctx: AppContext, limit: usize) -> AppResult<CommandOutput> {
     // logs 不走 daemon，直接读本地 JSONL 文件即可。
+    // 这样即便 daemon 已退出，用户仍能查看最近一轮事件事实。
     let items = ctx.log.tail(limit)?;
     Ok(CommandOutput::Json(serde_json::to_value(items).map_err(
         |err| AppError::invalid("serialize logs output", err),
@@ -518,6 +530,8 @@ async fn run_logs(ctx: AppContext, limit: usize) -> AppResult<CommandOutput> {
 }
 
 async fn run_stop(ctx: AppContext, force: bool) -> AppResult<CommandOutput> {
+    // stop 先尝试优雅的 daemon IPC；
+    // 只有显式 `--force` 时才允许按 pid 做最后兜底。
     let request = IpcRequestEnvelope::new(IpcRequestPayload::Stop);
     match ctx.ipc_client().request(request).await {
         Ok(response) if response.ok => Ok(CommandOutput::Json(json!({

@@ -12,7 +12,6 @@ mod io;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use chrono::Utc;
 use serde_json::{Value, json};
@@ -268,7 +267,6 @@ async fn run_send(ctx: AppContext, args: SendCommandArgs) -> AppResult<CommandOu
         source: args.source.clone(),
         explicit_mode: args.explicit_mode,
         current_dir: current_dir.clone(),
-        ttl: args.ttl.map(Duration::from_secs),
     };
 
     // 手动模式不依赖 Hook stdin。

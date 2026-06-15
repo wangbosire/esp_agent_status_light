@@ -9,29 +9,13 @@ use crate::model::{
 };
 use crate::ports::source::SourceAdapter;
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CursorHookInput {
-    // Cursor 官方事件字段大量使用 camelCase，但也可能混入 snake_case；
-    // 结构体负责主路径解析，通用辅助函数再补充兼容字段读取。
-    conversation_id: Option<String>,
-    generation_id: Option<String>,
     hook_event_name: Option<String>,
-    model: Option<String>,
-    cursor_version: Option<String>,
-    workspace_roots: Option<Vec<String>>,
-    transcript_path: Option<String>,
     tool_name: Option<String>,
-    tool_input: Option<Value>,
-    tool_use_id: Option<String>,
-    command: Option<String>,
     status: Option<String>,
-    failure_type: Option<String>,
-    error_message: Option<String>,
     reason: Option<String>,
-    duration: Option<u64>,
-    cwd: Option<String>,
 }
 
 /// Cursor Hook 解析器。

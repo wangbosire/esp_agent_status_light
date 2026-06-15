@@ -51,7 +51,6 @@ impl AppError {
         Self::new("invalid_input", format!("{context}: {err}"))
     }
 
-    #[allow(dead_code)]
     /// 构造“不支持当前操作或环境”的统一错误。
     pub fn unsupported(message: impl Into<String>) -> Self {
         Self::new("unsupported", message.into())
@@ -252,11 +251,6 @@ pub struct HookParseContext {
     ///
     /// 它会参与 session fallback 生成，也会作为 `cwd` 的兜底来源。
     pub current_dir: PathBuf,
-    #[allow(dead_code)]
-    /// 命令行显式传入的 TTL。
-    ///
-    /// 当前大多数 adapter 不直接使用它做模式判断，但保留在上下文里便于后续扩展。
-    pub ttl: Option<Duration>,
 }
 
 /// `SourceAdapter` 的输出结构。
@@ -543,7 +537,7 @@ pub(crate) mod beijing_time {
 /// 命令层通过它了解当前使用的传输类型和地址。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IpcInfo {
-    /// IPC 类型，例如 `unix_socket` / `named_pipe` / `tcp_loopback`。
+    /// IPC 类型，例如 `unix_socket` / `named_pipe`。
     pub kind: String,
     /// 当前 IPC 地址或路径。
     pub address: String,

@@ -10,7 +10,6 @@ fn claude_session_start_maps_to_green() {
         source: "claude".into(),
         explicit_mode: Mode::Thinking,
         current_dir: ".".into(),
-        ttl: None,
     };
     let event = ClaudeAdapter
         .parse(
@@ -31,7 +30,6 @@ fn claude_notification_maps_to_alarm() {
         source: "claude".into(),
         explicit_mode: Mode::Busy,
         current_dir: ".".into(),
-        ttl: None,
     };
     let event = ClaudeAdapter
         .parse(
@@ -52,7 +50,6 @@ fn claude_session_end_defaults_to_success() {
         source: "claude".into(),
         explicit_mode: Mode::Demo,
         current_dir: ".".into(),
-        ttl: None,
     };
     let event = ClaudeAdapter
         .parse(
@@ -73,7 +70,6 @@ fn claude_session_end_aborted_keeps_demo() {
         source: "claude".into(),
         explicit_mode: Mode::Demo,
         current_dir: ".".into(),
-        ttl: None,
     };
     let event = ClaudeAdapter
         .parse(
@@ -95,7 +91,6 @@ fn claude_read_maps_to_ai() {
         source: "claude".into(),
         explicit_mode: Mode::Ai,
         current_dir: ".".into(),
-        ttl: None,
     };
     let event = ClaudeAdapter
         .parse(
@@ -117,7 +112,6 @@ fn claude_post_tool_use_preserves_ai_fallback_mode() {
         source: "claude".into(),
         explicit_mode: Mode::Ai,
         current_dir: ".".into(),
-        ttl: None,
     };
     let event = ClaudeAdapter
         .parse(

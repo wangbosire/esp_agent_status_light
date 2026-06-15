@@ -6,5 +6,4 @@
 //! 3. 尽量让上层完全不关心 Unix socket / named pipe / TCP 的细节差异。
 
 pub mod named_pipe;
-pub mod tcp_loopback;
 pub mod unix_socket;

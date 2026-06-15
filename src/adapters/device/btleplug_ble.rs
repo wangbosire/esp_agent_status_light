@@ -154,28 +154,6 @@ impl LightDevice for BtleplugBleAdapter {
         Ok(())
     }
 
-    async fn read_mode(&mut self) -> AppResult<Option<Mode>> {
-        // 当前主要用于调试验证；正常运行链路以 write 为主。
-        let peripheral = self
-            .peripheral
-            .as_ref()
-            .ok_or_else(|| AppError::new("ble_not_connected", "device is not connected"))?;
-        let characteristic = self.characteristic.as_ref().ok_or_else(|| {
-            AppError::new(
-                "ble_characteristic_missing",
-                "mode characteristic not discovered",
-            )
-        })?;
-
-        let bytes = peripheral
-            .read(characteristic)
-            .await
-            .map_err(|err| AppError::new("ble_read_failed", err.to_string()))?;
-        let text = String::from_utf8(bytes)
-            .map_err(|err| AppError::invalid("device returned non-utf8 mode", err))?;
-        Ok(Some(text.parse()?))
-    }
-
     async fn health(&self) -> DeviceHealth {
         // status 路径需要尽量反映真实连接状态，因此这里做一次轻量的
         // `is_connected()` 探测；其它诸如最近写入模式、设备名仍沿用缓存快照。

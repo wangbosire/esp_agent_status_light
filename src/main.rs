@@ -13,7 +13,6 @@ mod router;
 mod runtime_lock;
 
 use clap::Parser;
-use tracing_subscriber::EnvFilter;
 
 use crate::command::{CommandOutput, run};
 
@@ -23,8 +22,6 @@ use crate::command::{CommandOutput, run};
 /// 3. 把控制权交给命令分发层。
 #[tokio::main]
 async fn main() {
-    init_tracing();
-
     let cli = cli::Cli::parse();
 
     match run(cli).await {
@@ -51,15 +48,4 @@ async fn main() {
             std::process::exit(1);
         }
     }
-}
-
-fn init_tracing() {
-    // tracing 主要服务于本地排障。
-    // 如果用户没有显式设置 `RUST_LOG`，默认输出 info 级别即可，
-    // 既能看到 daemon 生命周期，又不会把终端刷得太吵。
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .without_time()
-        .try_init();
 }

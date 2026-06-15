@@ -9,18 +9,11 @@ use crate::model::{
 };
 use crate::ports::source::SourceAdapter;
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct ClaudeHookInput {
-    // 保留完整字段形状，便于后续扩展和输入结构校验。
-    session_id: Option<String>,
-    transcript_path: Option<String>,
-    cwd: Option<String>,
     hook_event_name: Option<String>,
     reason: Option<String>,
     tool_name: Option<String>,
-    tool_input: Option<Value>,
-    tool_response: Option<Value>,
 }
 
 /// Claude Hook 解析器。

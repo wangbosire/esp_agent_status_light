@@ -9,22 +9,10 @@ use crate::model::{
 };
 use crate::ports::source::SourceAdapter;
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct CodexHookInput {
-    // 这些字段不一定都会在当前逻辑里使用，但保留结构定义有两个价值：
-    // 1. 能在 JSON 结构变化时尽早暴露解析异常；
-    // 2. 方便后续扩展更多映射规则时直接取用。
-    session_id: Option<String>,
-    cwd: Option<String>,
-    transcript_path: Option<String>,
     hook_event_name: Option<String>,
-    model: Option<String>,
-    turn_id: Option<String>,
-    permission_mode: Option<String>,
     tool_name: Option<String>,
-    tool_input: Option<Value>,
-    tool_response: Option<Value>,
 }
 
 /// Codex Hook 解析器。

@@ -25,7 +25,6 @@ fn resolve_mode_prefers_suggested_mode() {
         source: "codex".into(),
         explicit_mode: Mode::Busy,
         current_dir: ".".into(),
-        ttl: None,
     };
     let event = AgentEvent {
         source: AgentSource::new("codex"),

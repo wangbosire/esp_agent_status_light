@@ -11,7 +11,6 @@ fn codex_session_start_maps_to_green() {
         source: "codex".into(),
         explicit_mode: Mode::Thinking,
         current_dir: ".".into(),
-        ttl: None,
     };
     let event = CodexAdapter
         .parse(
@@ -33,7 +32,6 @@ fn codex_bash_maps_to_busy() {
         source: "codex".into(),
         explicit_mode: Mode::Busy,
         current_dir: ".".into(),
-        ttl: None,
     };
     let event = CodexAdapter
         .parse(
@@ -56,7 +54,6 @@ fn codex_read_maps_to_ai() {
         source: "codex".into(),
         explicit_mode: Mode::Ai,
         current_dir: ".".into(),
-        ttl: None,
     };
     let event = CodexAdapter
         .parse(
@@ -79,7 +76,6 @@ fn codex_post_tool_use_preserves_ai_fallback_mode() {
         source: "codex".into(),
         explicit_mode: Mode::Ai,
         current_dir: ".".into(),
-        ttl: None,
     };
     let event = CodexAdapter
         .parse(

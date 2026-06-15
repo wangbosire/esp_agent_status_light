@@ -10,7 +10,6 @@ fn cursor_session_start_maps_to_green() {
         source: "cursor".into(),
         explicit_mode: Mode::Thinking,
         current_dir: ".".into(),
-        ttl: None,
     };
     let event = CursorAdapter
         .parse(
@@ -31,7 +30,6 @@ fn cursor_failure_maps_to_error() {
         source: "cursor".into(),
         explicit_mode: Mode::Busy,
         current_dir: ".".into(),
-        ttl: None,
     };
     let event = CursorAdapter
         .parse(
@@ -52,7 +50,6 @@ fn cursor_session_and_turn_use_camel_case_fields() {
         source: "cursor".into(),
         explicit_mode: Mode::Busy,
         current_dir: "/tmp/project".into(),
-        ttl: None,
     };
     let event = CursorAdapter
         .parse(
@@ -77,7 +74,6 @@ fn cursor_after_agent_response_maps_to_ai() {
         source: "cursor".into(),
         explicit_mode: Mode::Ai,
         current_dir: "/tmp/project".into(),
-        ttl: None,
     };
     let event = CursorAdapter
         .parse(
@@ -98,7 +94,6 @@ fn cursor_before_read_file_maps_to_ai() {
         source: "cursor".into(),
         explicit_mode: Mode::Ai,
         current_dir: "/tmp/project".into(),
-        ttl: None,
     };
     let event = CursorAdapter
         .parse(

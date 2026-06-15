@@ -5,7 +5,6 @@ use async_trait::async_trait;
 use crate::model::{AppResult, DeviceHealth, DeviceInfo, Mode};
 use crate::ports::device::LightDevice;
 
-#[allow(dead_code)]
 #[derive(Debug, Default)]
 pub struct MockLightDevice {
     /// 是否已经过 connect。
@@ -31,11 +30,6 @@ impl LightDevice for MockLightDevice {
         // 直接把最后一次写入缓存下来，供测试断言。
         self.mode = Some(mode);
         Ok(())
-    }
-
-    async fn read_mode(&mut self) -> AppResult<Option<Mode>> {
-        // 读取直接返回本地缓存，足以覆盖单元测试对“最近一次写入”的断言需求。
-        Ok(self.mode)
     }
 
     async fn health(&self) -> DeviceHealth {

@@ -59,11 +59,6 @@ impl LightDevice for TestLightDevice {
         Ok(())
     }
 
-    async fn read_mode(&mut self) -> AppResult<Option<Mode>> {
-        let state = self.state.lock().await;
-        Ok(state.writes.last().copied())
-    }
-
     async fn health(&self) -> DeviceHealth {
         let state = self.state.lock().await;
         DeviceHealth {
@@ -115,11 +110,6 @@ impl LightDevice for HangingWriteDevice {
         Ok(())
     }
 
-    async fn read_mode(&mut self) -> AppResult<Option<Mode>> {
-        let state = self.state.lock().await;
-        Ok(state.writes.last().copied())
-    }
-
     async fn health(&self) -> DeviceHealth {
         let state = self.state.lock().await;
         DeviceHealth {
@@ -163,10 +153,6 @@ impl LightDevice for SlowConnectDevice {
         Ok(())
     }
 
-    async fn read_mode(&mut self) -> AppResult<Option<Mode>> {
-        Ok(None)
-    }
-
     async fn health(&self) -> DeviceHealth {
         DeviceHealth {
             connected: false,
@@ -205,11 +191,6 @@ impl LightDevice for IdleRefreshDevice {
         let mut state = self.state.lock().await;
         state.writes.push(mode);
         Ok(())
-    }
-
-    async fn read_mode(&mut self) -> AppResult<Option<Mode>> {
-        let state = self.state.lock().await;
-        Ok(state.writes.last().copied())
     }
 
     async fn health(&self) -> DeviceHealth {
@@ -829,7 +810,6 @@ fn build_hook_request(
         source: source.into(),
         explicit_mode,
         current_dir: current_dir.clone(),
-        ttl: None,
     };
     let event = registry.parse_or_fallback(input, &ctx);
     let resolved_mode = resolve_mode(&ctx, &event);

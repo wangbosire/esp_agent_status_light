@@ -415,7 +415,7 @@ pub struct LogEvent {
     pub timestamp: DateTime<Utc>,
     /// 日志等级，目前主要是 `info` / `warn`。
     pub level: String,
-    /// 日志类别，例如 daemon / ble / ipc_send。
+    /// 日志类别，例如 daemon / send / ipc / ble / router。
     pub kind: String,
     /// 面向人的简短描述。
     pub message: String,

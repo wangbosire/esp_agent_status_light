@@ -200,7 +200,7 @@ async fn run_daemon(ctx: AppContext, foreground: bool) -> AppResult<CommandOutpu
         append_runtime_log(
             ctx.log.as_ref(),
             RuntimeLogEvent {
-                kind: "runtime_command",
+                kind: "command",
                 phase: "daemon.background_requested",
                 message: "daemon command requested background startup",
                 code: None,
@@ -223,7 +223,7 @@ async fn run_daemon(ctx: AppContext, foreground: bool) -> AppResult<CommandOutpu
     append_runtime_log(
         ctx.log.as_ref(),
         RuntimeLogEvent {
-            kind: "runtime_command",
+            kind: "command",
             phase: "daemon.foreground_requested",
             message: "daemon command entering foreground run loop",
             code: None,
@@ -245,7 +245,7 @@ async fn run_send(ctx: AppContext, args: SendCommandArgs) -> AppResult<CommandOu
     append_runtime_log(
         ctx.log.as_ref(),
         RuntimeLogEvent {
-            kind: "runtime_send",
+            kind: "send",
             phase: "send.received",
             message: "send command started",
             code: None,
@@ -275,7 +275,7 @@ async fn run_send(ctx: AppContext, args: SendCommandArgs) -> AppResult<CommandOu
         append_runtime_log(
             ctx.log.as_ref(),
             RuntimeLogEvent {
-                kind: "runtime_send",
+                kind: "send",
                 phase: "send.manual_bypass",
                 message: "manual source bypassed hook stdin parsing",
                 code: None,
@@ -304,7 +304,7 @@ async fn run_send(ctx: AppContext, args: SendCommandArgs) -> AppResult<CommandOu
         append_runtime_log(
             ctx.log.as_ref(),
             RuntimeLogEvent {
-                kind: "runtime_send",
+                kind: "send",
                 phase: "send.stdin_loaded",
                 message: "hook stdin loaded",
                 code: None,
@@ -352,7 +352,7 @@ async fn run_send(ctx: AppContext, args: SendCommandArgs) -> AppResult<CommandOu
             append_runtime_log(
                 ctx.log.as_ref(),
                 RuntimeLogEvent {
-                    kind: "runtime_send",
+                    kind: "send",
                     phase: "send.hook_parse_fallback",
                     message,
                     code: Some(code),
@@ -368,7 +368,7 @@ async fn run_send(ctx: AppContext, args: SendCommandArgs) -> AppResult<CommandOu
     append_runtime_log(
         ctx.log.as_ref(),
         RuntimeLogEvent {
-            kind: "runtime_send",
+            kind: "send",
             phase: "send.hook_normalized",
             message: "hook event normalized",
             code: None,
@@ -400,7 +400,7 @@ async fn run_send(ctx: AppContext, args: SendCommandArgs) -> AppResult<CommandOu
     append_runtime_log(
         ctx.log.as_ref(),
         RuntimeLogEvent {
-            kind: "runtime_send",
+            kind: "send",
             phase: "send.mode_resolved",
             message: "mode resolved",
             code: None,
@@ -440,7 +440,7 @@ async fn run_send(ctx: AppContext, args: SendCommandArgs) -> AppResult<CommandOu
     append_runtime_log(
         ctx.log.as_ref(),
         RuntimeLogEvent {
-            kind: "runtime_send",
+            kind: "send",
             phase: "send.ipc_dispatch",
             message: "dispatching ipc send request",
             code: None,
@@ -458,7 +458,7 @@ async fn run_send(ctx: AppContext, args: SendCommandArgs) -> AppResult<CommandOu
             append_runtime_log(
                 ctx.log.as_ref(),
                 RuntimeLogEvent {
-                    kind: "runtime_send",
+                    kind: "send",
                     phase: "send.completed",
                     message: "ipc send request completed successfully",
                     code: None,
@@ -477,7 +477,7 @@ async fn run_send(ctx: AppContext, args: SendCommandArgs) -> AppResult<CommandOu
             append_runtime_log(
                 ctx.log.as_ref(),
                 RuntimeLogEvent {
-                    kind: "runtime_send",
+                    kind: "send",
                     phase: "send.application_error",
                     message: "ipc send request returned application error",
                     code: response.code.as_deref(),
@@ -501,7 +501,7 @@ async fn run_send(ctx: AppContext, args: SendCommandArgs) -> AppResult<CommandOu
             append_runtime_log(
                 ctx.log.as_ref(),
                 RuntimeLogEvent {
-                    kind: "runtime_send",
+                    kind: "send",
                     phase: "send.transport_error",
                     message: "ipc transport failed",
                     code: Some(&err.code),

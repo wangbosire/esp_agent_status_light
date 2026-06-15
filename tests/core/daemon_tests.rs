@@ -1036,7 +1036,7 @@ async fn simulated_hook_trigger_updates_status_and_logs() {
         .iter()
         .map(|item| item.kind.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(kinds.iter().filter(|kind| **kind == "ipc_send").count(), 3);
+    assert_eq!(kinds.iter().filter(|kind| **kind == "send").count(), 3);
 
     let stop = daemon
         .handle(IpcRequestEnvelope::new(IpcRequestPayload::Stop))
@@ -1249,10 +1249,7 @@ async fn simulated_alarm_flow_recovers_after_follow_up_hook() {
     assert_eq!(data["sources"][0]["mode"], serde_json::json!("busy"));
 
     let logs = log.tail(20).expect("read logs");
-    assert_eq!(
-        logs.iter().filter(|item| item.kind == "ipc_send").count(),
-        2
-    );
+    assert_eq!(logs.iter().filter(|item| item.kind == "send").count(), 2);
 
     let _ = std::fs::remove_dir_all(runtime_root);
 }

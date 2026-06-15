@@ -263,7 +263,7 @@ impl Daemon {
     async fn try_connect_device(&self) -> AppResult<()> {
         // 连接能力完全委托给 device adapter，本层只关心成功或失败。
         self.append_runtime_log(RuntimeLogEvent {
-            kind: "runtime_ble",
+            kind: "ble",
             phase: "ble.connect_attempt",
             message: "attempting device connect",
             code: None,
@@ -282,7 +282,7 @@ impl Daemon {
                 })
                 .await;
                 self.append_runtime_log(RuntimeLogEvent {
-                    kind: "runtime_ble",
+                    kind: "ble",
                     phase: "ble.connect_success",
                     message: "device connect succeeded",
                     code: None,
@@ -300,7 +300,7 @@ impl Daemon {
                 })
                 .await;
                 self.append_runtime_log(RuntimeLogEvent {
-                    kind: "runtime_ble",
+                    kind: "ble",
                     phase: "ble.connect_failed",
                     message: "device connect failed",
                     code: Some(&err.code),
@@ -323,7 +323,7 @@ impl Daemon {
                 .await;
                 let err = AppError::new("ble_connect_timeout", "device connect timed out");
                 self.append_runtime_log(RuntimeLogEvent {
-                    kind: "runtime_ble",
+                    kind: "ble",
                     phase: "ble.connect_failed",
                     message: "device connect timed out",
                     code: Some(&err.code),
@@ -352,7 +352,7 @@ impl Daemon {
             router.effective_mode(now)
         };
         self.append_runtime_log(RuntimeLogEvent {
-            kind: "runtime_ble",
+            kind: "ble",
             phase: "ble.sync_started",
             message: "sync_effective_mode started",
             code: None,
@@ -373,7 +373,7 @@ impl Daemon {
             }
             Err(_) => {
                 self.append_runtime_log(RuntimeLogEvent {
-                    kind: "runtime_ble",
+                    kind: "ble",
                     phase: "ble.health_timeout",
                     message: "device health probe timed out before write",
                     code: Some("ble_health_timeout"),
@@ -395,7 +395,7 @@ impl Daemon {
         let mut reconnected_before_write = false;
         if !health.connected {
             self.append_runtime_log(RuntimeLogEvent {
-                kind: "runtime_ble",
+                kind: "ble",
                 phase: "ble.reconnect_before_write",
                 message: "device was disconnected during sync, reconnecting before write",
                 code: None,
@@ -441,7 +441,7 @@ impl Daemon {
             }
         } else if self.is_ble_connection_stale(now).await {
             self.append_runtime_log(RuntimeLogEvent {
-                kind: "runtime_ble",
+                kind: "ble",
                 phase: "ble.reconnect_before_write",
                 message: "device connection looked stale after idle, reconnecting before write",
                 code: None,
@@ -499,7 +499,7 @@ impl Daemon {
         };
         if effective != initial_effective {
             self.append_runtime_log(RuntimeLogEvent {
-                kind: "runtime_ble",
+                kind: "ble",
                 phase: "ble.sync_effective_refreshed",
                 message: "effective mode refreshed before BLE write",
                 code: None,
@@ -522,7 +522,7 @@ impl Daemon {
             && last_applied.is_some_and(|mode| mode == effective)
         {
             self.append_runtime_log(RuntimeLogEvent {
-                kind: "runtime_ble",
+                kind: "ble",
                 phase: "ble.write_skipped_unchanged",
                 message: "skipped BLE write because effective mode did not change",
                 code: None,
@@ -568,7 +568,7 @@ impl Daemon {
         })
         .await;
         self.append_runtime_log(RuntimeLogEvent {
-            kind: "runtime_ble",
+            kind: "ble",
             phase: "ble.write_success",
             message: "BLE write succeeded and last_applied_mode updated",
             code: None,
@@ -628,8 +628,8 @@ impl Daemon {
     /// 5. 根据 BLE 写入结果返回成功或“已接受但设备暂不可用”的响应。
     async fn handle_send(&self, request_id: &str, payload: SendPayload) -> IpcResponseEnvelope {
         self.append_runtime_log(RuntimeLogEvent {
-            kind: "runtime_ipc_send",
-            phase: "ipc_send.received",
+            kind: "ipc",
+            phase: "ipc.send_received",
             message: "daemon received send request",
             code: None,
             source: Some(&payload.source),
@@ -656,7 +656,7 @@ impl Daemon {
             Ok(effective) => effective,
             Err(err) => {
                 self.append_runtime_log(RuntimeLogEvent {
-                    kind: "runtime_router",
+                    kind: "router",
                     phase: "router.state_rejected",
                     message: "router rejected state update",
                     code: Some(&err.code),
@@ -673,7 +673,7 @@ impl Daemon {
             }
         };
         self.append_runtime_log(RuntimeLogEvent {
-            kind: "runtime_router",
+            kind: "router",
             phase: "router.state_applied",
             message: "router applied state and resolved effective mode",
             code: None,
@@ -690,7 +690,7 @@ impl Daemon {
         });
 
         let _ = self.append_log(
-            "ipc_send",
+            "send",
             "accepted state update",
             None,
             Some(&payload.source),
@@ -716,8 +716,8 @@ impl Daemon {
         });
 
         self.append_runtime_log(RuntimeLogEvent {
-            kind: "runtime_ipc_send",
-            phase: "ipc_send.completed",
+            kind: "ipc",
+            phase: "ipc.send_completed",
             message: "daemon completed send request successfully",
             code: None,
             source: Some(&payload.source),
@@ -837,7 +837,7 @@ impl Daemon {
                 })
                 .await;
                 self.append_runtime_log(RuntimeLogEvent {
-                    kind: "runtime_ble",
+                    kind: "ble",
                     phase: "ble.status_health_timeout",
                     message: "status BLE health probe timed out",
                     code: Some("ble_health_timeout"),
@@ -903,7 +903,7 @@ impl SendSyncContext {
     async fn run(&self) {
         if let Err(err) = self.daemon.sync_effective_mode(false).await {
             self.daemon.append_runtime_log(RuntimeLogEvent {
-                kind: "runtime_ble",
+                kind: "ble",
                 phase: "ble.sync_failed",
                 message: "sync_effective_mode failed",
                 code: Some(&err.code),

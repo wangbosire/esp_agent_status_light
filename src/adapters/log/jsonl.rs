@@ -34,19 +34,11 @@ impl JsonlLogAdapter {
 
 impl EventLog for JsonlLogAdapter {
     fn append(&self, event: LogEvent) -> AppResult<()> {
-        self.runtime.ensure_layout()?;
-        let _guard = LogWriteGuard::acquire(&self.runtime.runtime_log_path())?;
-        self.append_event_and_runtime_locked(
-            &self.runtime.events_log_path(),
-            &self.runtime.runtime_log_path(),
-            event,
-        )
+        self.append_internal(LogTarget::EventsAndRuntime, event)
     }
 
     fn append_runtime(&self, event: LogEvent) -> AppResult<()> {
-        self.runtime.ensure_layout()?;
-        let _guard = LogWriteGuard::acquire(&self.runtime.runtime_log_path())?;
-        self.append_runtime_locked(&self.runtime.runtime_log_path(), event)
+        self.append_internal(LogTarget::RuntimeOnly, event)
     }
 
     fn tail(&self, limit: usize) -> AppResult<Vec<LogEvent>> {
@@ -75,25 +67,22 @@ impl EventLog for JsonlLogAdapter {
 }
 
 impl JsonlLogAdapter {
-    fn append_event_and_runtime_locked(
-        &self,
-        events_path: &Path,
-        runtime_path: &Path,
-        event: LogEvent,
-    ) -> AppResult<()> {
-        // 采用 JSONL 追加写入：简单、稳定，而且适合按行 tail。
-        let line = serde_json::to_string(&event)
-            .map_err(|err| AppError::invalid("serialize log event", err))?;
-        append_jsonl_line(events_path, &line, "events")?;
-        append_jsonl_line(runtime_path, &line, "runtime")?;
-        self.maybe_trim_runtime_log(runtime_path)
-    }
-
-    fn append_runtime_locked(&self, runtime_path: &Path, event: LogEvent) -> AppResult<()> {
+    fn append_internal(&self, target: LogTarget, event: LogEvent) -> AppResult<()> {
+        self.runtime.ensure_layout()?;
+        let runtime_path = self.runtime.runtime_log_path();
+        let _guard = LogWriteGuard::acquire(&runtime_path)?;
         let line = serde_json::to_string(&event)
             .map_err(|err| AppError::invalid("serialize runtime log event", err))?;
-        append_jsonl_line(runtime_path, &line, "runtime")?;
-        self.maybe_trim_runtime_log(runtime_path)
+        match target {
+            LogTarget::EventsAndRuntime => {
+                append_jsonl_line(&self.runtime.events_log_path(), &line, "events")?;
+                append_jsonl_line(&runtime_path, &line, "runtime")?;
+            }
+            LogTarget::RuntimeOnly => {
+                append_jsonl_line(&runtime_path, &line, "runtime")?;
+            }
+        }
+        self.maybe_trim_runtime_log(&runtime_path)
     }
 
     fn maybe_trim_runtime_log(&self, runtime_path: &Path) -> AppResult<()> {
@@ -115,6 +104,11 @@ impl JsonlLogAdapter {
             Ok(())
         }
     }
+}
+
+enum LogTarget {
+    EventsAndRuntime,
+    RuntimeOnly,
 }
 
 /// 追加一行 JSONL 到指定日志文件。

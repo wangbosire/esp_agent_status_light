@@ -36,7 +36,7 @@ pub(super) async fn request_with_auto_start(
             append_runtime_log(
                 ctx.log.as_ref(),
                 RuntimeLogEvent {
-                    kind: "runtime_ipc",
+                    kind: "ipc",
                     phase: "ipc.initial_success",
                     message: "initial ipc request succeeded",
                     code: None,
@@ -56,7 +56,7 @@ pub(super) async fn request_with_auto_start(
             append_runtime_log(
                 ctx.log.as_ref(),
                 RuntimeLogEvent {
-                    kind: "runtime_ipc",
+                    kind: "ipc",
                     phase: "ipc.initial_failed",
                     message: "initial ipc request failed, attempting daemon auto-start",
                     code: None,
@@ -73,7 +73,7 @@ pub(super) async fn request_with_auto_start(
             append_runtime_log(
                 ctx.log.as_ref(),
                 RuntimeLogEvent {
-                    kind: "runtime_ipc",
+                    kind: "ipc",
                     phase: if retried.is_ok() {
                         "ipc.retry_success"
                     } else {
@@ -117,7 +117,7 @@ pub(super) async fn ensure_daemon_running(ctx: &AppContext) -> AppResult<()> {
         append_runtime_log(
             ctx.log.as_ref(),
             RuntimeLogEvent {
-                kind: "runtime_daemon_boot",
+                kind: "daemon_boot",
                 phase: "daemon_boot.already_ready",
                 message: "daemon already ready during auto-start check",
                 code: None,
@@ -136,8 +136,8 @@ pub(super) async fn ensure_daemon_running(ctx: &AppContext) -> AppResult<()> {
             append_runtime_log(
                 ctx.log.as_ref(),
                 RuntimeLogEvent {
-                    kind: "runtime_daemon_boot",
-                    phase: "daemon_boot.healthcheck_alive",
+                    kind: "daemon_boot",
+                    phase: "daemon_boot.pid_alive",
                     message: "daemon health check found alive pid with ready ipc",
                     code: None,
                     source: None,
@@ -152,8 +152,8 @@ pub(super) async fn ensure_daemon_running(ctx: &AppContext) -> AppResult<()> {
         append_runtime_log(
             ctx.log.as_ref(),
             RuntimeLogEvent {
-                kind: "runtime_daemon_boot",
-                phase: "daemon_boot.healthcheck_stale",
+                kind: "daemon_boot",
+                phase: "daemon_boot.pid_stale",
                 message: "daemon health check found stale or unreachable pid, clearing runtime markers",
                 code: None,
                 source: None,
@@ -178,7 +178,7 @@ pub(super) async fn ensure_daemon_running(ctx: &AppContext) -> AppResult<()> {
     append_runtime_log(
         ctx.log.as_ref(),
         RuntimeLogEvent {
-            kind: "runtime_daemon_boot",
+            kind: "daemon_boot",
             phase: "daemon_boot.spawn",
             message: "spawning background daemon",
             code: None,
@@ -200,7 +200,7 @@ pub(super) async fn ensure_daemon_running(ctx: &AppContext) -> AppResult<()> {
             append_runtime_log(
                 ctx.log.as_ref(),
                 RuntimeLogEvent {
-                    kind: "runtime_daemon_boot",
+                    kind: "daemon_boot",
                     phase: "daemon_boot.ready",
                     message: "daemon became ready after auto-start",
                     code: None,
@@ -217,7 +217,7 @@ pub(super) async fn ensure_daemon_running(ctx: &AppContext) -> AppResult<()> {
     append_runtime_log(
         ctx.log.as_ref(),
         RuntimeLogEvent {
-            kind: "runtime_daemon_boot",
+            kind: "daemon_boot",
             phase: "daemon_boot.timeout",
             message: "daemon did not become ready after auto-start timeout window",
             code: Some("ipc_unavailable"),
@@ -259,8 +259,8 @@ fn clear_stale_daemon_startup_lock(ctx: &AppContext, stale_pid: Option<(u32, boo
         append_runtime_log(
             ctx.log.as_ref(),
             RuntimeLogEvent {
-                kind: "runtime_daemon_boot",
-                phase: "daemon_boot.cleared_stale_startup_lock",
+                kind: "daemon_boot",
+                phase: "daemon_boot.startup_lock_cleared",
                 message: "cleared stale daemon startup lock before spawning daemon",
                 code: None,
                 source: None,

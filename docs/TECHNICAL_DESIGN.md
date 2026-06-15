@@ -184,6 +184,8 @@ ESP32-C3 作为 BLE Peripheral，电脑端 daemon 作为 Central。
 | 错误处理     | 自定义 `AppError`                 | 统一错误码与错误消息，避免第三方库错误泄漏到核心层             |
 | UUID     | `uuid`                           | BLE UUID、IPC request id、文件锁 owner token      |
 
+日志事件命名采用两层结构：`kind` 只表示稳定域名，例如 `send`、`ipc`、`daemon`、`daemon_boot`、`ble`、`router`；`phase` 表示域内步骤，使用 `域名.步骤` 形式，例如 `send.received`、`ipc.send_completed`、`daemon_boot.pid_stale`。不要在 `kind` 中混入 `runtime_` 或 `*_send` 这类来源/阶段前缀。
+
 ### 4.2 目标平台
 
 第一阶段支持：
@@ -1345,7 +1347,7 @@ trait EventLog {
 
 | adapter           | 用途                                |
 | ----------------- | --------------------------------- |
-| `JsonlLogAdapter` | 写入 `events.log` 和 `runtime.log`，便于 CLI 与链路排障读取 |
+| `JsonlLogAdapter` | 正常事件写入 `events.log` 和 `runtime.log`；错误/告警只写入 `runtime.log`，便于 CLI 与链路排障读取 |
 | 测试 fake log      | 单元测试中按需实现 `EventLog`             |
 
 ### 11.1 status 输出
@@ -1402,7 +1404,7 @@ trait EventLog {
 
 `JsonlLogAdapter::tail()` 读取 `events.log` 时会跳过损坏 JSONL 行，并继续返回其它可解析日志。这样即使日志文件中出现半写、手动编辑或历史坏行，`esp logs` 仍能用于排障。
 
-`runtime.log` 比 `events.log` 更细，包含 `send.received`、`send.mode_resolved`、`ble.sync_started`、`ble.sync_effective_refreshed` 等链路阶段。它会按写入次数低频裁剪，避免长期运行后无限增长。
+`events.log` 记录用户可见事实，例如 daemon 启停、`send` 状态更新被接受等；`runtime.log` 比 `events.log` 更细，包含 `send.received`、`send.mode_resolved`、`ipc.send_completed`、`ble.sync_started`、`ble.sync_effective_refreshed`、`daemon_boot.pid_stale` 等链路阶段。它会按写入次数低频裁剪，避免长期运行后无限增长。
 
 ## 12. 安全与权限
 

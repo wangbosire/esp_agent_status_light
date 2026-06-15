@@ -34,6 +34,7 @@ impl HookInstallAdapter for ClaudeInstallAdapter {
             // 会话刚打开时先显示绿色，表示 Agent 会话已建立、当前处于待命状态。
             spec(exe, "SessionStart", None, Mode::Green, 900),
             spec(exe, "UserPromptSubmit", None, Mode::Thinking, 900),
+            spec(exe, "MessageDisplay", None, Mode::Ai, 900),
             spec(exe, "PreToolUse", Some("Bash"), Mode::Busy, 1800),
             // 文件读取按最新规则也属于 AI 内容处理态。
             spec(exe, "PreToolUse", Some("Read"), Mode::Ai, 900),

@@ -4,11 +4,14 @@ use btleplug::api::{
 };
 use btleplug::platform::{Adapter, Manager, Peripheral};
 use chrono::Utc;
-use tokio::time::{Duration, sleep};
+use tokio::time::{Duration, Instant, sleep};
 use uuid::Uuid;
 
 use crate::model::{AppError, AppResult, DeviceHealth, DeviceInfo, Mode};
 use crate::ports::device::LightDevice;
+
+const BLE_SCAN_WINDOW: Duration = Duration::from_secs(6);
+const BLE_SCAN_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// 真实 BLE adapter 尽量保持“失败可恢复”：
 /// 1. daemon 可以先接受 IPC，再慢慢等待蓝牙恢复。
@@ -154,6 +157,21 @@ impl LightDevice for BtleplugBleAdapter {
         Ok(())
     }
 
+    async fn disconnect(&mut self) -> AppResult<()> {
+        if let Some(peripheral) = self.peripheral.as_ref()
+            && peripheral.is_connected().await.unwrap_or(false)
+        {
+            peripheral
+                .disconnect()
+                .await
+                .map_err(|err| AppError::new("ble_disconnect_failed", err.to_string()))?;
+        }
+        self.peripheral = None;
+        self.characteristic = None;
+        self.health.connected = false;
+        Ok(())
+    }
+
     async fn health(&self) -> DeviceHealth {
         // status 路径需要尽量反映真实连接状态，因此这里做一次轻量的
         // `is_connected()` 探测；其它诸如最近写入模式、设备名仍沿用缓存快照。
@@ -192,51 +210,84 @@ impl BtleplugBleAdapter {
         // 第一阶段采用简单全量扫描 + 最佳候选选择策略：
         // 满足“名称匹配或服务 UUID 匹配”即可，再从中选择 RSSI 最强者。
         //
-        // 之所以不把扫描窗口做得更短，是因为部分平台蓝牙栈需要一点时间
-        // 才能把 advertisement/service 信息补全。
+        // 部分平台蓝牙栈需要一点时间才能把 advertisement/service 信息补全。
+        // 因此这里采用“启动扫描 + 多轮轮询”的方式，找到目标后尽快返回；
+        // 没找到时也能在错误信息里带上扫描摘要，方便定位是设备未广播还是名称/UUID 不匹配。
         adapter
             .start_scan(ScanFilter::default())
             .await
             .map_err(|err| AppError::new("ble_scan_failed", err.to_string()))?;
-        sleep(Duration::from_secs(2)).await;
 
-        let peripherals = adapter
-            .peripherals()
-            .await
-            .map_err(|err| AppError::new("ble_peripheral_list_failed", err.to_string()))?;
-
+        let scan_started = Instant::now();
         let mut best: Option<(i16, Peripheral)> = None;
-        for peripheral in peripherals {
-            let Some(properties) = peripheral
-                .properties()
-                .await
-                .map_err(|err| AppError::new("ble_properties_failed", err.to_string()))?
-            else {
-                continue;
-            };
+        let mut max_seen_peripherals = 0usize;
+        let mut nearby_names = Vec::<String>::new();
 
-            let name_matches = properties
-                .local_name
-                .as_deref()
-                .is_some_and(|name| name == self.device_name);
-            let service_matches = properties.services.contains(&self.service_uuid);
-            // 名称匹配便于开发阶段人工识别，服务 UUID 匹配则能覆盖重命名设备等情况。
-            if !name_matches && !service_matches {
-                continue;
+        while scan_started.elapsed() < BLE_SCAN_WINDOW {
+            sleep(BLE_SCAN_POLL_INTERVAL).await;
+            let peripherals = adapter
+                .peripherals()
+                .await
+                .map_err(|err| AppError::new("ble_peripheral_list_failed", err.to_string()))?;
+            max_seen_peripherals = max_seen_peripherals.max(peripherals.len());
+
+            for peripheral in peripherals {
+                let Ok(properties) = peripheral.properties().await else {
+                    continue;
+                };
+                let Some(properties) = properties else {
+                    continue;
+                };
+
+                if let Some(name) = properties.local_name.as_deref()
+                    && nearby_names.len() < 8
+                    && !nearby_names.iter().any(|seen| seen == name)
+                {
+                    nearby_names.push(name.to_string());
+                }
+
+                let name_matches = properties
+                    .local_name
+                    .as_deref()
+                    .is_some_and(|name| name == self.device_name);
+                let service_matches = properties.services.contains(&self.service_uuid);
+                // 名称匹配便于开发阶段人工识别，服务 UUID 匹配则能覆盖重命名设备等情况。
+                if !name_matches && !service_matches {
+                    continue;
+                }
+
+                // 多个设备同时满足条件时，优先选择信号最强的那个。
+                let rssi = properties.rssi.unwrap_or(i16::MIN);
+                match &best {
+                    Some((best_rssi, _)) if *best_rssi >= rssi => {}
+                    _ => {
+                        best = Some((rssi, peripheral.clone()));
+                    }
+                }
             }
 
-            // 多个设备同时满足条件时，优先选择信号最强的那个。
-            let rssi = properties.rssi.unwrap_or(i16::MIN);
-            match &best {
-                Some((best_rssi, _)) if *best_rssi >= rssi => {}
-                _ => {
-                    best = Some((rssi, peripheral.clone()));
-                }
+            if best.is_some() {
+                break;
             }
         }
 
+        let _ = adapter.stop_scan().await;
+
         best.map(|(_, peripheral)| peripheral).ok_or_else(|| {
-            AppError::new("ble_device_not_found", "AgentStatusLight device not found")
+            AppError::new(
+                "ble_device_not_found",
+                format!(
+                    "{} device not found after {}ms scan; scanned up to {} peripherals; nearby names: {}",
+                    self.device_name,
+                    BLE_SCAN_WINDOW.as_millis(),
+                    max_seen_peripherals,
+                    if nearby_names.is_empty() {
+                        "<none>".into()
+                    } else {
+                        nearby_names.join(", ")
+                    }
+                ),
+            )
         })
     }
 }

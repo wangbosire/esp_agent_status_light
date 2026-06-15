@@ -29,7 +29,7 @@ const DEVICE_HEALTH_TIMEOUT: Duration = Duration::from_millis(500);
 #[cfg(test)]
 const DEVICE_CONNECT_TIMEOUT: Duration = Duration::from_millis(80);
 #[cfg(not(test))]
-const DEVICE_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+const DEVICE_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[cfg(test)]
 const DEVICE_WRITE_TIMEOUT: Duration = Duration::from_millis(80);
@@ -173,8 +173,10 @@ impl Daemon {
 
         {
             let mut device = self.device.lock().await;
-            // 退出时尽量把灯灭掉；如果失败，也不阻止进程退出。
+            // 退出时尽量把灯灭掉并主动断开 BLE，避免旧连接残留影响下次启动。
+            // 如果失败，也不阻止进程退出。
             let _ = device.write_mode(Mode::Off).await;
+            let _ = device.disconnect().await;
         }
 
         let _ = self.runtime.clear_pid();

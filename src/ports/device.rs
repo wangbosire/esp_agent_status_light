@@ -15,6 +15,10 @@ pub trait LightDevice: Send + Sync {
     /// 这是整个系统最关键的副作用接口之一：
     /// router 算出的最终 mode，都会在 daemon 中通过它落到真实硬件。
     async fn write_mode(&mut self, mode: Mode) -> AppResult<()>;
+    /// 主动断开设备连接。
+    ///
+    /// daemon 停止时需要释放底层 BLE 连接，避免下次启动时旧连接残留导致二次连接失败。
+    async fn disconnect(&mut self) -> AppResult<()>;
     /// 返回连接健康状态快照。
     ///
     /// 这不是实时订阅接口，而是一次“当前我看起来是否健康”的轮询结果，

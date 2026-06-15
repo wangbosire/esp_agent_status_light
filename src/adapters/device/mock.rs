@@ -32,6 +32,11 @@ impl LightDevice for MockLightDevice {
         Ok(())
     }
 
+    async fn disconnect(&mut self) -> AppResult<()> {
+        self.connected = false;
+        Ok(())
+    }
+
     async fn health(&self) -> DeviceHealth {
         DeviceHealth {
             connected: self.connected,

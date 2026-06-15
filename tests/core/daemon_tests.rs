@@ -33,6 +33,7 @@ struct DeviceState {
     connected: bool,
     writes: Vec<Mode>,
     fail_write: bool,
+    disconnect_calls: usize,
 }
 
 struct TestLightDevice {
@@ -56,6 +57,13 @@ impl LightDevice for TestLightDevice {
             return Err(AppError::new("ble_write_failed", "simulated write failure"));
         }
         state.writes.push(mode);
+        Ok(())
+    }
+
+    async fn disconnect(&mut self) -> AppResult<()> {
+        let mut state = self.state.lock().await;
+        state.connected = false;
+        state.disconnect_calls += 1;
         Ok(())
     }
 
@@ -110,6 +118,12 @@ impl LightDevice for HangingWriteDevice {
         Ok(())
     }
 
+    async fn disconnect(&mut self) -> AppResult<()> {
+        let mut state = self.state.lock().await;
+        state.connected = false;
+        Ok(())
+    }
+
     async fn health(&self) -> DeviceHealth {
         let state = self.state.lock().await;
         DeviceHealth {
@@ -153,6 +167,10 @@ impl LightDevice for SlowConnectDevice {
         Ok(())
     }
 
+    async fn disconnect(&mut self) -> AppResult<()> {
+        Ok(())
+    }
+
     async fn health(&self) -> DeviceHealth {
         DeviceHealth {
             connected: false,
@@ -193,6 +211,12 @@ impl LightDevice for IdleRefreshDevice {
         Ok(())
     }
 
+    async fn disconnect(&mut self) -> AppResult<()> {
+        let mut state = self.state.lock().await;
+        state.health_connected = false;
+        Ok(())
+    }
+
     async fn health(&self) -> DeviceHealth {
         let state = self.state.lock().await;
         DeviceHealth {
@@ -229,6 +253,10 @@ impl LightDevice for RefreshBeforeWriteDevice {
     async fn write_mode(&mut self, mode: Mode) -> AppResult<()> {
         let mut state = self.state.lock().await;
         state.writes.push(mode);
+        Ok(())
+    }
+
+    async fn disconnect(&mut self) -> AppResult<()> {
         Ok(())
     }
 
@@ -432,6 +460,7 @@ async fn handle_send_accepts_even_when_ble_write_fails_later() {
         connected: true,
         writes: Vec::new(),
         fail_write: true,
+        disconnect_calls: 0,
     }));
     let daemon = build_daemon(device_state);
 
@@ -464,6 +493,7 @@ async fn sync_effective_mode_force_write_reapplies_same_mode() {
         connected: true,
         writes: Vec::new(),
         fail_write: false,
+        disconnect_calls: 0,
     }));
     let daemon = build_daemon(device_state.clone());
 
@@ -537,6 +567,7 @@ async fn hook_state_flow_uses_latest_state_within_same_session() {
         connected: true,
         writes: Vec::new(),
         fail_write: false,
+        disconnect_calls: 0,
     }));
     let daemon = build_daemon(device_state.clone());
 
@@ -781,6 +812,7 @@ async fn status_reports_live_ble_health_instead_of_cached_snapshot() {
         connected: false,
         writes: Vec::new(),
         fail_write: false,
+        disconnect_calls: 0,
     }));
     let daemon = build_daemon(device_state.clone());
 
@@ -895,6 +927,51 @@ async fn idle_connection_refreshes_before_next_write() {
     let state = device_state.lock().await;
     assert_eq!(state.connect_calls, 1);
     assert_eq!(state.writes, vec![Mode::Demo, Mode::Demo]);
+
+    let _ = std::fs::remove_dir_all(runtime_root);
+}
+
+#[tokio::test]
+async fn daemon_stop_disconnects_ble_device() {
+    let runtime_root = temp_runtime_root("disconnect-on-stop");
+    let runtime: Arc<dyn RuntimeStore> = Arc::new(FsRuntimeAdapter::new(runtime_root.clone()));
+    let device_state = Arc::new(Mutex::new(DeviceState {
+        connected: true,
+        writes: Vec::new(),
+        fail_write: false,
+        disconnect_calls: 0,
+    }));
+    let daemon = Daemon::new(
+        runtime.clone(),
+        Arc::new(TestEventLog),
+        Box::new(TestLightDevice {
+            state: device_state.clone(),
+        }),
+    );
+    let (serve_started_tx, serve_started_rx) = oneshot::channel();
+    let server = Arc::new(ReadySignalServer {
+        serve_started_tx: Mutex::new(Some(serve_started_tx)),
+    });
+    let daemon_for_server = daemon.clone();
+    let serve_task = tokio::spawn(async move { daemon_for_server.run(server.clone()).await });
+
+    serve_started_rx
+        .await
+        .expect("server should start before stop request");
+
+    let stop = daemon
+        .handle(IpcRequestEnvelope::new(IpcRequestPayload::Stop))
+        .await;
+    assert!(stop.ok);
+
+    serve_task
+        .await
+        .expect("daemon task should join")
+        .expect("daemon should stop cleanly");
+
+    let state = device_state.lock().await;
+    assert_eq!(state.writes.last(), Some(&Mode::Off));
+    assert_eq!(state.disconnect_calls, 1);
 
     let _ = std::fs::remove_dir_all(runtime_root);
 }

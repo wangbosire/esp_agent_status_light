@@ -23,6 +23,8 @@ const CLI_AFTER_HELP: &str = "\
   esp status --verbose
   esp logs --limit 50
   esp install codex
+  esp installations
+  esp installations cursor
   esp install cursor --dir /path/to/project
   esp uninstall claude";
 const SEND_AFTER_HELP: &str = "\
@@ -188,6 +190,24 @@ daemon 负责维护 IPC 服务、管理状态路由、持有 BLE 设备连接，
         /// 最多返回多少条日志，命令层还会做范围裁剪。
         #[arg(long, default_value_t = 100, help = "最多返回多少条日志记录")]
         limit: usize,
+    },
+    /// 查看 Hook 安装信息。
+    #[command(
+        about = "查看 Hook 安装信息",
+        long_about = "\
+查看 AgentStatusLight 当前记录的 Hook 安装信息。
+
+不指定目标时默认列出全部已支持 Agent；指定目标时只查询该 Agent。
+该命令读取 runtime 安装清单，不依赖 daemon 在线。",
+        after_help = "\
+示例:
+  esp installations
+  esp installations cursor"
+    )]
+    Installations {
+        /// 可选安装目标；不传则查询全部目标。
+        #[arg(help = "安装目标：codex / cursor / claude；不传则查询全部")]
+        target: Option<String>,
     },
     /// 优雅停止 daemon。
     #[command(

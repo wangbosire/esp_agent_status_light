@@ -204,6 +204,7 @@ esp daemon [--foreground]
 esp send --mode <MODE> [--source <SOURCE>] [--session <SESSION>] [--ttl <SECONDS>] [--quiet] [--strict]
 esp status [--verbose]
 esp logs [--limit <N>]
+esp installations [TARGET]
 esp stop [--force]
 esp install <TARGET> [--dir <DIR>]
 esp uninstall <TARGET> [--dir <DIR>]
@@ -234,6 +235,8 @@ Uninstall {
   "message": "unknown install target: warp"
 }
 ```
+
+`esp installations [TARGET]` 用于读取 runtime 安装清单；不传 `TARGET` 时默认查询全部已注册安装目标，传入 `codex` / `cursor` / `claude` 时只返回对应目标。
 
 后续可增加 `esp adapters` 或 `esp install --list` 展示当前注册的 `SourceAdapter` / `HookInstallAdapter`，便于用户确认可接入目标。
 

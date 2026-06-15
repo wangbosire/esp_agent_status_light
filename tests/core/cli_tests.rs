@@ -13,6 +13,7 @@ fn root_help_includes_quick_start_examples() {
 
     assert!(help.contains("AgentStatusLight 的命令行工具"));
     assert!(help.contains("esp send --mode demo"));
+    assert!(help.contains("esp installations"));
     assert!(help.contains("esp install cursor --dir /path/to/project"));
 }
 
@@ -41,4 +42,17 @@ fn install_help_lists_supported_targets() {
 
     assert!(help.contains("当前支持 `codex`、`cursor`、`claude`"));
     assert!(help.contains("esp install claude --dir ."));
+}
+
+#[test]
+fn installations_help_mentions_default_all_targets() {
+    let mut cmd = Cli::command();
+    let help = cmd
+        .find_subcommand_mut("installations")
+        .expect("installations subcommand should exist")
+        .render_long_help()
+        .to_string();
+
+    assert!(help.contains("不指定目标时默认列出全部已支持 Agent"));
+    assert!(help.contains("esp installations cursor"));
 }

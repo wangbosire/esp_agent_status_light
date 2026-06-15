@@ -177,6 +177,7 @@ pub async fn run(cli: Cli) -> AppResult<CommandOutput> {
         }
         Commands::Status { verbose } => run_status(ctx, verbose).await,
         Commands::Logs { limit } => run_logs(ctx, limit).await,
+        Commands::Installations { target } => run_installations(ctx, target).await,
         Commands::Stop { force } => run_stop(ctx, force).await,
         Commands::Install { target, dir } => run_install(ctx, target, dir).await,
         Commands::Uninstall { target, dir } => run_uninstall(ctx, target, dir).await,
@@ -571,6 +572,39 @@ async fn run_logs(ctx: AppContext, limit: usize) -> AppResult<CommandOutput> {
     Ok(CommandOutput::Json(serde_json::to_value(items).map_err(
         |err| AppError::invalid("serialize logs output", err),
     )?))
+}
+
+async fn run_installations(ctx: AppContext, target: Option<String>) -> AppResult<CommandOutput> {
+    ctx.runtime.ensure_layout()?;
+    let targets = if let Some(target) = target {
+        // 复用 registry 的目标校验，保证未知 target 的错误码和 install/uninstall 一致。
+        ctx.install_registry.get(&target)?;
+        vec![target]
+    } else {
+        ctx.install_registry.targets()
+    };
+
+    let mut items = Vec::with_capacity(targets.len());
+    for target in targets {
+        let manifest_path = ctx.runtime.install_manifest_path(&target);
+        let manifest = ctx.runtime.read_install_manifest(&target)?;
+        let installations = manifest
+            .as_ref()
+            .map(|index| index.installations.clone())
+            .unwrap_or_default();
+        items.push(json!({
+            "target": target,
+            "installed": !installations.is_empty(),
+            "manifest_path": manifest_path,
+            "installations": installations,
+        }));
+    }
+
+    Ok(CommandOutput::Json(json!({
+        "ok": true,
+        "runtime_root": ctx.runtime.runtime_root(),
+        "targets": items,
+    })))
 }
 
 async fn run_stop(ctx: AppContext, force: bool) -> AppResult<CommandOutput> {

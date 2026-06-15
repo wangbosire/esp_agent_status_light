@@ -74,4 +74,11 @@ impl HookInstallRegistry {
             )
         })
     }
+
+    /// 返回当前注册的全部安装目标名。
+    pub fn targets(&self) -> Vec<String> {
+        let mut targets = self.adapters.keys().cloned().collect::<Vec<_>>();
+        targets.sort();
+        targets
+    }
 }

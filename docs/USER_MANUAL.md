@@ -166,6 +166,22 @@ esp install cursor --dir /你的项目目录
 
 `codex` 和 `claude` 也支持同样的 `--dir` 方式。
 
+### 6.5 查看安装信息
+
+查看全部已支持 Agent 的安装记录：
+
+```bash
+esp installations
+```
+
+只查看某一个 Agent：
+
+```bash
+esp installations cursor
+```
+
+输出会包含安装清单路径、是否已安装，以及全局/项目级配置文件路径。
+
 ---
 
 ## 7. Hook 安装后会发生什么
@@ -388,6 +404,8 @@ esp send --mode off
 esp status
 esp status --verbose
 esp logs --limit 50
+esp installations
+esp installations cursor
 esp stop
 esp install codex
 esp install cursor

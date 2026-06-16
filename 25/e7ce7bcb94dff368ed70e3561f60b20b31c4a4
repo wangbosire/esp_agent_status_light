@@ -1,0 +1,14 @@
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "25e7ce7bcb94dff368ed70e3561f60b20b31c4a4",
+  "prompts": {},
+  "humans": {
+    "h_cad90eb1fc4978": {
+      "author": "wangbo <wangbo.2373265157@bytedance.com>"
+    }
+  },
+  "attestation_metadata": {},
+  "remote_transcripts": {}
+}

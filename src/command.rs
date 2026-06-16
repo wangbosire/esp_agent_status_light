@@ -37,7 +37,7 @@ use boot::{ensure_daemon_running, force_stop_by_pid, request_with_auto_start};
 use install::{backup_if_exists, read_json_or_empty, resolve_install_command, write_json};
 #[cfg(test)]
 use install::{build_cargo_run_hook_command, should_use_cargo_run_hooks};
-use io::read_stdin_json;
+use io::read_hook_input;
 
 pub enum CommandOutput {
     /// 输出 JSON，供脚本调用与人类查看共用。
@@ -307,7 +307,8 @@ async fn run_send(ctx: AppContext, args: SendCommandArgs) -> AppResult<CommandOu
             semantics: EventSemantics::Unknown,
         }
     } else {
-        let stdin_json = read_stdin_json()?.unwrap_or_else(|| json!({}));
+        let hook_input = read_hook_input()?;
+        let stdin_json = hook_input.parsed_json.clone().unwrap_or_else(|| json!({}));
         append_runtime_log(
             ctx.log.as_ref(),
             RuntimeLogEvent {
@@ -319,6 +320,10 @@ async fn run_send(ctx: AppContext, args: SendCommandArgs) -> AppResult<CommandOu
                 session: None,
                 mode: Some(args.explicit_mode),
                 context: Some(json!({
+                    "raw_input": hook_input.raw_input,
+                    "input_parse_error": hook_input.parse_error,
+                    "input_timed_out": hook_input.timed_out,
+                    "input_json": stdin_json.clone(),
                     "has_hook_event": stdin_json
                         .get("hook_event_name")
                         .or_else(|| stdin_json.get("hookEventName"))

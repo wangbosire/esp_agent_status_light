@@ -130,6 +130,42 @@ esp send --mode off
 
 如果手动测试正常，说明设备、蓝牙和后台服务基本可用。
 
+### 5.4 蓝牙设备配置、扫描和连接测试
+
+默认设备名和 UUID 与随附固件一致，通常不需要修改：
+
+```text
+Device Name: AgentStatusLight
+Service UUID: b8b7e001-7a6b-4f4f-9a8b-11c0ffee0001
+Mode Characteristic UUID: b8b7e002-7a6b-4f4f-9a8b-11c0ffee0001
+```
+
+查看当前电脑端 BLE 配置：
+
+```bash
+esp ble config
+```
+
+如果你修改过固件广播名或 UUID，可以写入新的配置：
+
+```bash
+esp ble config --name AgentStatusLight --service-uuid b8b7e001-7a6b-4f4f-9a8b-11c0ffee0001 --mode-char-uuid b8b7e002-7a6b-4f4f-9a8b-11c0ffee0001
+```
+
+扫描附近 BLE 设备：
+
+```bash
+esp ble scan --duration 10
+```
+
+扫描结果中 `matches_config=true` 的设备表示名称或 Service UUID 匹配当前配置。
+
+独立测试 BLE 连接，不依赖 daemon 在线：
+
+```bash
+esp ble test --mode green
+```
+
 ---
 
 ## 6. 安装 Hook 联动 AI 工具
@@ -267,6 +303,15 @@ esp logs --limit 20
 - 蓝牙写入是否失败
 - 状态是否被成功接收
 
+`esp logs` 读取面向用户的 `events.log`。如果需要排查 Hook 原始输入，可以查看 runtime 目录下的 `runtime/runtime.log`；`send.stdin_loaded` 记录会包含：
+
+- `raw_input`：Hook 传给 `esp send` 的原始 stdin 文本
+- `input_json`：解析后的 JSON
+- `input_parse_error`：JSON 解析失败时的错误
+- `input_timed_out`：stdin 读取是否超时
+
+注意：`raw_input` 可能包含项目路径、工具参数或其它上下文，分享日志前请先确认内容。
+
 ---
 
 ## 11. 停止后台服务
@@ -286,6 +331,12 @@ esp stop --force
 ```
 
 通常只在排障时使用强制停止。
+
+### 11.3 空闲自动停止
+
+后台 daemon 如果连续 1 小时没有收到任何 Hook / `send` 事件，会自动停止并释放蓝牙连接。
+
+这是正常省资源行为。下一次 Hook 触发或手动执行 `esp send --mode demo` 时，命令会自动拉起 daemon。
 
 ---
 
@@ -346,15 +397,19 @@ esp send --mode demo
 esp status --verbose
 ```
 
+如果长时间没有使用，daemon 可能已经因为 1 小时空闲自动停止。这不是故障，下一次 `esp send` 或 Hook 触发会自动拉起。
+
 ### 14.2 灯不亮，但命令没有报错
 
 请依次检查：
 
 1. 设备是否通电
 2. 蓝牙是否开启
-3. 是否能执行 `esp send --mode green`
-4. `esp status --verbose` 中 `ble` 是否为 `connected`
-5. `esp logs --limit 50` 中是否有 BLE 相关错误
+3. 是否能执行 `esp ble scan --duration 10`
+4. 是否能执行 `esp ble test --mode green`
+5. 是否能执行 `esp send --mode green`
+6. `esp status --verbose` 中 `ble` 是否为 `connected`
+7. `esp logs --limit 50` 中是否有 BLE 相关错误
 
 ### 14.3 手动命令可用，但 AI 工具联动没反应
 
@@ -401,6 +456,9 @@ esp status --verbose
 ```bash
 esp send --mode demo
 esp send --mode off
+esp ble config
+esp ble scan --duration 10
+esp ble test --mode green
 esp status
 esp status --verbose
 esp logs --limit 50

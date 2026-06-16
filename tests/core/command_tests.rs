@@ -61,3 +61,30 @@ fn ble_scan_duration_must_be_in_supported_range() {
     let err = validate_ble_scan_duration(61).expect_err("long duration should be rejected");
     assert_eq!(err.code, "invalid_ble_scan_duration");
 }
+
+#[test]
+fn hook_input_keeps_original_stdin_for_runtime_logs() {
+    let raw = "{\n  \"hook_event_name\": \"PreToolUse\",\n  \"tool_name\": \"Read\"\n}\n";
+    let input = io::hook_input_from_raw(raw.into());
+
+    assert_eq!(input.raw_input.as_deref(), Some(raw));
+    assert_eq!(
+        input.parsed_json.as_ref().and_then(|value| {
+            value
+                .get("hook_event_name")
+                .and_then(serde_json::Value::as_str)
+        }),
+        Some("PreToolUse")
+    );
+    assert!(input.parse_error.is_none());
+}
+
+#[test]
+fn hook_input_keeps_original_stdin_when_json_is_invalid() {
+    let raw = "{not-json";
+    let input = io::hook_input_from_raw(raw.into());
+
+    assert_eq!(input.raw_input.as_deref(), Some(raw));
+    assert_eq!(input.parsed_json, Some(serde_json::json!({})));
+    assert!(input.parse_error.is_some());
+}

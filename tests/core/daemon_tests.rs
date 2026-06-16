@@ -501,6 +501,48 @@ async fn handle_send_accepts_even_when_ble_write_fails_later() {
 }
 
 #[tokio::test]
+async fn handle_send_marks_daemon_activity_for_idle_shutdown() {
+    let device_state = Arc::new(Mutex::new(DeviceState::default()));
+    let daemon = build_daemon(device_state);
+
+    assert!(!daemon.is_idle_too_long().await);
+
+    let response = daemon
+        .handle_send("activity-1", send_payload(Mode::Busy))
+        .await;
+    assert!(response.ok);
+    assert!(!daemon.is_idle_too_long().await);
+}
+
+#[tokio::test]
+async fn idle_shutdown_loop_stops_daemon_after_long_inactivity() {
+    let device_state = Arc::new(Mutex::new(DeviceState::default()));
+    let daemon = build_daemon(device_state);
+    *daemon.last_event_at.lock().await =
+        Some(Utc::now() - chrono::Duration::from_std(DAEMON_IDLE_SHUTDOWN_INTERVAL).unwrap());
+
+    let mut shutdown = daemon.shutdown_receiver();
+    let task = {
+        let daemon = daemon.clone();
+        tokio::spawn(async move {
+            daemon.idle_shutdown_loop().await;
+        })
+    };
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            shutdown.changed().await.expect("shutdown should change");
+            if *shutdown.borrow() {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("idle shutdown should trigger quickly in tests");
+    task.await.expect("idle task should finish");
+}
+
+#[tokio::test]
 async fn sync_effective_mode_force_write_reapplies_same_mode() {
     let device_state = Arc::new(Mutex::new(DeviceState {
         connected: true,

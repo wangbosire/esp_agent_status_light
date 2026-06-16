@@ -51,7 +51,8 @@ flowchart TD
     Power --> Esp32["ESP32-C3 广播 BLE<br/>名称：AgentStatusLight"]
 
     User --> Package["获取电脑端工具包<br/>macOS / Windows"]
-    Package --> Test["手动测试<br/>send --mode demo / off"]
+    Package --> BleDiag["BLE 配置与排障<br/>ble config / scan / test"]
+    BleDiag --> Test["手动测试<br/>send --mode demo / off"]
     Test --> Daemon["后台 daemon 自动启动"]
     Daemon --> Ble["保持 BLE 连接"]
     Ble --> Esp32
@@ -61,12 +62,15 @@ flowchart TD
     AgentConfig --> Agent["Agent 工作中触发 Hook"]
     Agent --> Send["Hook 调用 send<br/>--source + --session auto<br/>--ttl + --quiet"]
     Send --> Ipc["本地 IPC 发送给 daemon"]
+    Send --> RuntimeLog["runtime.log<br/>记录 Hook raw_input"]
     Ipc --> Router["状态优先级路由<br/>按 source/session 合并"]
     Router --> Mode["选择最高优先级 mode"]
     Mode --> Ble
+    Daemon --> IdleStop["1 小时无事件<br/>自动停止"]
+    IdleStop --> Send
     Esp32 --> Light["红 / 黄 / 绿状态灯展示"]
 
-    User --> Status["排障命令<br/>status --verbose<br/>logs --limit 100"]
+    User --> Status["排障命令<br/>ble scan/test<br/>status --verbose<br/>logs --limit 100"]
     Status --> Daemon
 ```
 
@@ -293,6 +297,8 @@ demo / thinking / ai / busy / success / error / alarm / traffic / off / red / ye
 ```bash
 esp send --mode thinking
 esp send --mode busy --source codex --session my-session --ttl 1800
+esp ble scan --duration 10
+esp ble test --mode green
 esp status --verbose
 ```
 
@@ -316,6 +322,7 @@ esp status --verbose
 .esp-agent-status-light/
 ├─ bin/ # Hook 调用的 esp 相关脚本
 ├─ runtime/ # daemon pid、日志、IPC 信息和 token
+├─ ble.json # BLE 设备名、Service UUID 和 mode characteristic UUID 配置
 └─ config.[codex/cursor/claude].json # 安装清单，卸载时用于判断是否可以删除空配置文件
 ```
 
@@ -342,6 +349,9 @@ esp.exe install [codex/cursor/claude] --dir .
 macOS：
 
 ```bash
+esp ble config
+esp ble scan --duration 10
+esp ble test --mode green
 esp send --mode demo
 esp send --mode thinking
 esp send --mode ai
@@ -356,6 +366,9 @@ esp send --mode off
 Windows：
 
 ```powershell
+esp.exe ble config
+esp.exe ble scan --duration 10
+esp.exe ble test --mode green
 esp.exe send --mode demo
 esp.exe send --mode thinking
 esp.exe send --mode ai
@@ -446,6 +459,8 @@ alarm > error > yellow > busy > ai > thinking > success > red > green > demo > t
 ```
 
 状态会在 daemon 内保留一段时间；高优先级状态过期后，会自动回落到其它仍然活跃的低优先级状态。手动执行 `esp send --mode off` 会清空所有 source/session；Hook 中的 `off` 只清除对应 source/session。
+
+如果 daemon 连续 1 小时没有收到任何 Hook / `send` 事件，会自动停止并释放 BLE 连接。下一次 Hook 触发或手动执行 `esp send` 时，命令侧会自动拉起 daemon。
 
 长任务可以通过 `--ttl <seconds>` 延长保留时间。安装脚本生成的 Hook 会自动带 `--quiet`、`--ttl` 和隐藏标记 `--hook-id agent-status-light`：`--quiet` 避免 warning 污染 Hook 输出，`--hook-id` 让卸载更精准。排障时可以使用：
 

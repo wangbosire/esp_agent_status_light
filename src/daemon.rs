@@ -49,6 +49,15 @@ const DEVICE_IDLE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 #[cfg(not(test))]
 const DEVICE_IDLE_REFRESH_INTERVAL: Duration = Duration::from_secs(120);
 
+#[cfg(test)]
+const DAEMON_IDLE_SHUTDOWN_INTERVAL: Duration = Duration::from_secs(5);
+#[cfg(not(test))]
+const DAEMON_IDLE_SHUTDOWN_INTERVAL: Duration = Duration::from_secs(60 * 60);
+#[cfg(test)]
+const DAEMON_IDLE_SHUTDOWN_CHECK_INTERVAL: Duration = Duration::from_millis(50);
+#[cfg(not(test))]
+const DAEMON_IDLE_SHUTDOWN_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+
 /// daemon 是唯一持有 LightDevice 的进程。
 /// 所有 Hook 事件都要先经过 IPC 进入这里，再由这里统一做优先级路由和 BLE 写入。
 pub struct Daemon {
@@ -71,6 +80,8 @@ pub struct Daemon {
     last_ble_write_at: Mutex<Option<chrono::DateTime<chrono::Utc>>>,
     /// 最近一次真正写到设备上的模式，用于去重和重连补写。
     last_applied_mode: Mutex<Option<Mode>>,
+    /// 最近一次成功接收并处理 hook/send 事件的时间。
+    last_event_at: Mutex<Option<chrono::DateTime<chrono::Utc>>>,
     /// 进程级启动锁，避免并发 spawn 出多个 daemon。
     startup_lock: Mutex<Option<FileLock>>,
     /// 允许 `&self` 路径安全升级回 `Arc<Self>`，用于后台任务派发。
@@ -105,6 +116,7 @@ impl Daemon {
             device_health: Mutex::new(DeviceHealth::default()),
             last_ble_write_at: Mutex::new(None),
             last_applied_mode: Mutex::new(None),
+            last_event_at: Mutex::new(None),
             startup_lock: Mutex::new(None),
             self_ref: self_ref.clone(),
         })
@@ -161,6 +173,12 @@ impl Daemon {
                 daemon.reconnect_loop().await;
             })
         };
+        let idle_shutdown_task = {
+            let daemon = self.clone();
+            tokio::spawn(async move {
+                daemon.idle_shutdown_loop().await;
+            })
+        };
 
         let serve_result = server.serve(self.clone(), self.shutdown_receiver()).await;
 
@@ -170,6 +188,7 @@ impl Daemon {
         let _ = initial_connect_task.await;
         let _ = expiry_task.await;
         let _ = reconnect_task.await;
+        let _ = idle_shutdown_task.await;
 
         {
             let mut device = self.device.lock().await;
@@ -252,6 +271,41 @@ impl Daemon {
                             let _ = self.append_log("ble", "device reconnect failed", Some(&err.code), None, None, None);
                             index = (index + 1).min(backoff.len() - 1);
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    /// 空闲自动停机后台任务。
+    ///
+    /// daemon 长时间没有收到任何 send/hook 事件时主动停止自身；
+    /// 下一次 hook 触发会通过命令层现有 auto-start 逻辑重新拉起。
+    async fn idle_shutdown_loop(self: Arc<Self>) {
+        let mut shutdown = self.shutdown_receiver();
+        loop {
+            tokio::select! {
+                changed = shutdown.changed() => {
+                    if changed.is_ok() && *shutdown.borrow() {
+                        break;
+                    }
+                }
+                _ = sleep(DAEMON_IDLE_SHUTDOWN_CHECK_INTERVAL) => {
+                    if self.is_idle_too_long().await {
+                        self.append_runtime_log(RuntimeLogEvent {
+                            kind: "daemon",
+                            phase: "daemon.idle_shutdown",
+                            message: "daemon stopped after extended idle period",
+                            code: None,
+                            source: None,
+                            session: None,
+                            mode: None,
+                            context: Some(json!({
+                                "idle_threshold_secs": DAEMON_IDLE_SHUTDOWN_INTERVAL.as_secs(),
+                            })),
+                        });
+                        let _ = self.shutdown_tx.send(true);
+                        break;
                     }
                 }
             }
@@ -699,6 +753,7 @@ impl Daemon {
             Some(&payload.session),
             Some(payload.mode),
         );
+        self.mark_event_activity().await;
 
         let Some(sync_daemon) = self.self_ref.upgrade() else {
             return IpcResponseEnvelope::error(
@@ -880,6 +935,21 @@ impl Daemon {
             .to_std()
             .ok()
             .is_some_and(|elapsed| elapsed >= DEVICE_IDLE_REFRESH_INTERVAL)
+    }
+
+    async fn mark_event_activity(&self) {
+        *self.last_event_at.lock().await = Some(Utc::now());
+    }
+
+    async fn is_idle_too_long(&self) -> bool {
+        let Some(last_event_at) = *self.last_event_at.lock().await else {
+            return false;
+        };
+        Utc::now()
+            .signed_duration_since(last_event_at)
+            .to_std()
+            .ok()
+            .is_some_and(|elapsed| elapsed >= DAEMON_IDLE_SHUTDOWN_INTERVAL)
     }
 }
 

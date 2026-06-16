@@ -42,6 +42,8 @@ esp send --mode demo
 你也可以继续测试：
 
 ```bash
+esp ble scan --duration 10
+esp ble test --mode green
 esp send --mode green
 esp send --mode yellow
 esp send --mode red
@@ -97,6 +99,8 @@ esp status --verbose
 ```bash
 esp send --mode demo
 esp send --mode off
+esp ble scan --duration 10
+esp ble test --mode green
 esp status
 esp status --verbose
 esp logs --limit 50
@@ -134,7 +138,13 @@ esp logs --limit 50
 
 - 设备是否通电
 - 电脑蓝牙是否开启
+- `esp ble scan --duration 10` 是否能看到匹配设备
+- `esp ble test --mode green` 是否能独立连上设备
 - 是否已经安装对应 Hook
+
+### daemon 显示未运行
+
+如果长时间没有使用，后台 daemon 会在 1 小时空闲后自动停止。再次执行 `esp send --mode demo` 或下一次 Hook 触发时会自动拉起。
 
 ### Hook 没生效
 

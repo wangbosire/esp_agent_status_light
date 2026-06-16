@@ -23,11 +23,11 @@
 
 | 模块 | 当前职责 | 关键输入 | 关键输出 |
 | --- | --- | --- | --- |
-| `src/cli.rs` | 暴露 `daemon`、`send`、`status`、`logs`、`stop`、`install`、`uninstall` 命令面 | 用户命令行参数 | 结构化 CLI 命令 |
-| `src/command.rs` | 装配 runtime / log / platform / source registry / install registry；处理自动拉起 daemon；把 Hook stdin 归一后发往 IPC | CLI 参数、Hook stdin JSON | `SendPayload`、IPC 请求、状态输出 |
+| `src/cli.rs` | 暴露 `daemon`、`send`、`status`、`logs`、`stop`、`ble`、`install`、`uninstall` 命令面 | 用户命令行参数 | 结构化 CLI 命令 |
+| `src/command.rs` | 装配 runtime / log / platform / source registry / install registry；处理自动拉起 daemon；记录 Hook 原始 stdin；把 Hook stdin 归一后发往 IPC | CLI 参数、Hook stdin JSON | `SendPayload`、IPC 请求、状态输出 |
 | `src/adapters/source/*.rs` | 按 `source` 解析 Codex / Cursor / Claude Hook JSON，抽取 `session`、`turn`、`semantics`、`capability`、`suggested_mode` | 宿主工具 Hook JSON | `AgentEvent` |
 | `src/router.rs` | `resolve_mode` 与 `StateRouter`；按 `(source, session)` 维护状态池，处理 TTL、优先级、AI 保留规则 | `AgentEvent`、`SendPayload` | 当前 session 状态、全局 `effective mode` |
-| `src/daemon.rs` | 独占 `LightDevice`；接收 IPC；调用 router；派发后台 BLE 同步；写前刷新最新 effective；维护 TTL 清理与断线重连后台任务 | IPC 请求、router 决策结果 | BLE 写入、`StatusResponse`、日志 |
+| `src/daemon.rs` | 独占 `LightDevice`；接收 IPC；调用 router；派发后台 BLE 同步；写前刷新最新 effective；维护 TTL 清理、断线重连和空闲自动停止后台任务 | IPC 请求、router 决策结果 | BLE 写入、`StatusResponse`、日志 |
 | `src/adapters/install/*.rs` | 把统一 `HookSpec` 翻译成 Codex / Cursor / Claude 的官方配置结构 | 安装目标、配置 JSON、平台差异 | 更新后的 hooks/settings JSON |
 | `src/adapters/runtime/fs.rs` / `src/runtime_lock.rs` | 统一管理 runtime 根目录、日志、IPC 信息、安装清单、稳定二进制副本路径和跨进程文件锁 | runtime root、锁 owner | `runtime/`、`bin/`、`config.<target>.json`、token 化 lock 文件 |
 
@@ -44,6 +44,7 @@ flowchart LR
     subgraph SendProcess["单次 esp send 进程"]
         CLI["esp send"]
         Stdin["Hook stdin JSON"]
+        HookInput["HookInput<br/>raw_input + parsed_json"]
         Registry["SourceAdapterRegistry"]
         Adapter["Codex / Cursor / Claude / Fallback Adapter"]
         Event["AgentEvent"]
@@ -51,7 +52,8 @@ flowchart LR
         Payload["SendPayload"]
         IPCClient["IpcTransport Client"]
 
-        Stdin --> Registry
+        Stdin --> HookInput
+        HookInput --> Registry
         Registry --> Adapter
         Adapter --> Event
         Event --> Resolver
@@ -65,6 +67,7 @@ flowchart LR
         Router["StateRouter"]
         TTL["expiry_loop()"]
         Reconnect["reconnect_loop()"]
+        Idle["idle_shutdown_loop()"]
         Runtime["RuntimeStore"]
         EventLog["EventLog / JSONL"]
         DevicePort["LightDevice"]
@@ -73,6 +76,7 @@ flowchart LR
         Daemon --> Router
         TTL --> Router
         Reconnect --> DevicePort
+        Idle --> Daemon
         Daemon --> Runtime
         Daemon --> EventLog
         Daemon --> DevicePort
@@ -90,7 +94,10 @@ flowchart LR
 
     Hook --> CLI
     Hook -. 注入 .-> Stdin
+    HookInput -. raw_input / input_json .-> EventLog
     IPCClient --> IPCServer
+    Runtime --> BleConfig["ble.json<br/>设备名 / UUID"]
+    BleConfig --> BLE
 ```
 
 ### 1.3 用户使用总流程
@@ -101,7 +108,8 @@ flowchart TD
     Power --> Esp32["ESP32-C3 广播 BLE<br/>名称：AgentStatusLight"]
 
     User --> Package["获取电脑端工具包<br/>macOS / Windows"]
-    Package --> Test["手动测试<br/>send --mode demo / off"]
+    Package --> BleDiag["BLE 配置与排障<br/>ble config / scan / test"]
+    BleDiag --> Test["手动测试<br/>send --mode demo / off"]
     Test --> Daemon["后台 daemon 自动启动"]
     Daemon --> Ble["保持 BLE 连接"]
     Ble --> Esp32
@@ -111,12 +119,15 @@ flowchart TD
     AgentConfig --> Agent["Agent 工作中触发 Hook"]
     Agent --> Send["Hook 调用 send<br/>--source + --session auto<br/>--ttl + --quiet"]
     Send --> Ipc["本地 IPC 发送给 daemon"]
+    Send --> RuntimeLog["runtime.log<br/>记录 Hook raw_input"]
     Ipc --> Router["状态优先级路由<br/>按 source/session 合并"]
     Router --> Mode["选择最高优先级 mode"]
     Mode --> Ble
+    Daemon --> IdleStop["1 小时无事件<br/>自动停止"]
+    IdleStop --> Send
     Esp32 --> Light["红 / 黄 / 绿状态灯展示"]
 
-    User --> Status["排障命令<br/>status --verbose<br/>logs --limit 100"]
+    User --> Status["排障命令<br/>ble scan/test<br/>status --verbose<br/>logs --limit 100"]
     Status --> Daemon
 ```
 
@@ -142,6 +153,7 @@ sequenceDiagram
 
     Agent->>Hook: 触发 Hook 事件并传入 stdin JSON
     Hook->>Send: 执行 esp send --source X --session auto --ttl ... --quiet
+    Send->>Send: runtime.log 记录 raw_input / input_json
     Send->>Registry: parse_or_fallback(stdin_json, HookParseContext)
     Registry->>Adapter: 按 source 选择 adapter
     Adapter-->>Registry: AgentEvent(session, turn, semantics, capability, suggested_mode)
@@ -224,6 +236,14 @@ sequenceDiagram
                 Daemon->>Device: sync_effective_mode(true)
                 Daemon->>Daemon: 强制补写 latest effective
             end
+        end
+    end
+
+    loop 每 30 秒
+        Daemon->>Daemon: idle_shutdown_loop()
+        alt 连续 1 小时无 send / Hook 事件
+            Daemon->>Server: shutdown
+            Daemon->>Runtime: clear_pid / clear_ipc_info
         end
     end
 ```
@@ -418,6 +438,7 @@ classDiagram
 | --- | --- | --- |
 | runtime 根目录 | 平台适配器决定，例如 `~/.esp-agent-status-light` | 统一保存安装清单、稳定二进制、副作用运行文件 |
 | 稳定二进制副本 | `<runtime_root>/bin/esp` 或 `esp.exe` | release / 分发场景下 Hook 实际引用的命令路径 |
+| BLE 配置 | `<runtime_root>/ble.json` | 保存设备名、Service UUID 和 mode characteristic UUID，供 daemon、scan、test 共用 |
 | 安装清单 | `<runtime_root>/config.<target>.json` | 记录该 `target` 的多条安装记录，按 `config_path` 去重/upsert |
 | daemon 运行信息 | `<runtime_root>/runtime/daemon.pid`、`ipc.json`、`daemon.lock`、`daemon-autostart.lock` | daemon 自恢复、启动串行化、排障与 `status` 查询 |
 | 日志文件 | `<runtime_root>/runtime/events.log`、`runtime.log`、`runtime.lock` | `logs` 读取用户事件；runtime 链路日志用于排查；日志写入通过 token 化文件锁串行化 |

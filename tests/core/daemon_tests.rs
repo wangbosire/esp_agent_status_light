@@ -19,7 +19,8 @@ use crate::adapters::device::mock::MockLightDevice;
 use crate::adapters::log::jsonl::JsonlLogAdapter;
 use crate::adapters::runtime::fs::FsRuntimeAdapter;
 use crate::model::{
-    AppError, DeviceInfo, EventSemantics, InstallManifest, InstallManifestIndex, IpcInfo,
+    AppError, BleDeviceConfig, DeviceInfo, EventSemantics, InstallManifest, InstallManifestIndex,
+    IpcInfo,
 };
 use crate::ports::ipc::{IpcRequestHandler, IpcServer};
 use crate::ports::log::EventLog;
@@ -344,6 +345,10 @@ impl RuntimeStore for TestRuntimeStore {
         self.runtime_dir().join("daemon.sock")
     }
 
+    fn ble_config_path(&self) -> PathBuf {
+        self.runtime_root().join("ble.json")
+    }
+
     fn ensure_layout(&self) -> AppResult<()> {
         Ok(())
     }
@@ -382,6 +387,14 @@ impl RuntimeStore for TestRuntimeStore {
 
     fn read_install_manifest(&self, _target: &str) -> AppResult<Option<InstallManifestIndex>> {
         Ok(None)
+    }
+
+    fn read_ble_config(&self) -> AppResult<BleDeviceConfig> {
+        Ok(BleDeviceConfig::default())
+    }
+
+    fn write_ble_config(&self, _config: &BleDeviceConfig) -> AppResult<()> {
+        Ok(())
     }
 }
 

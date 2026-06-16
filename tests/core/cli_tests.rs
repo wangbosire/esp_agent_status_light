@@ -56,3 +56,18 @@ fn installations_help_mentions_default_all_targets() {
     assert!(help.contains("不指定目标时默认列出全部已支持 Agent"));
     assert!(help.contains("esp installations cursor"));
 }
+
+#[test]
+fn ble_help_lists_config_scan_and_test_examples() {
+    let mut cmd = Cli::command();
+    let help = cmd
+        .find_subcommand_mut("ble")
+        .expect("ble subcommand should exist")
+        .render_long_help()
+        .to_string();
+
+    assert!(help.contains("管理 AgentStatusLight 使用的 BLE 设备配置"));
+    assert!(help.contains("esp ble config"));
+    assert!(help.contains("esp ble scan"));
+    assert!(help.contains("esp ble test --mode green"));
+}

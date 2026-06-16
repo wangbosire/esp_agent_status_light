@@ -12,15 +12,16 @@ mod io;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::Utc;
 use serde_json::{Value, json};
 
 use crate::adapters;
-use crate::cli::{Cli, Commands};
+use crate::cli::{BleCommands, Cli, Commands};
 use crate::daemon::Daemon;
 use crate::model::{
-    AgentCapability, AgentEvent, AgentSource, AppError, AppResult, EventSemantics,
+    AgentCapability, AgentEvent, AgentSource, AppError, AppResult, BleDeviceConfig, EventSemantics,
     HookParseContext, InstallManifest, InstallScope, IpcRequestEnvelope, IpcRequestPayload, Mode,
     RuntimeLogEvent, SendPayload, StatusResponse,
 };
@@ -136,9 +137,13 @@ impl AppContext {
     }
 
     /// 创建默认物理设备适配器。
-    fn device(&self) -> Box<dyn LightDevice> {
+    fn device(&self) -> AppResult<Box<dyn LightDevice>> {
         // 当前正式设备只有 BLE 实现；测试场景会直接绕过这里注入 mock。
-        Box::new(adapters::device::btleplug_ble::BtleplugBleAdapter::default())
+        Ok(Box::new(
+            adapters::device::btleplug_ble::BtleplugBleAdapter::with_config(
+                self.runtime.read_ble_config()?,
+            ),
+        ))
     }
 }
 
@@ -179,6 +184,7 @@ pub async fn run(cli: Cli) -> AppResult<CommandOutput> {
         Commands::Logs { limit } => run_logs(ctx, limit).await,
         Commands::Installations { target } => run_installations(ctx, target).await,
         Commands::Stop { force } => run_stop(ctx, force).await,
+        Commands::Ble { command } => run_ble(ctx, command).await,
         Commands::Install { target, dir } => run_install(ctx, target, dir).await,
         Commands::Uninstall { target, dir } => run_uninstall(ctx, target, dir).await,
     }
@@ -234,7 +240,7 @@ async fn run_daemon(ctx: AppContext, foreground: bool) -> AppResult<CommandOutpu
             context: None,
         },
     );
-    let daemon = Daemon::new(ctx.runtime.clone(), ctx.log.clone(), ctx.device());
+    let daemon = Daemon::new(ctx.runtime.clone(), ctx.log.clone(), ctx.device()?);
     daemon.run(ctx.ipc_server()).await?;
     Ok(CommandOutput::Silent)
 }
@@ -630,6 +636,91 @@ async fn run_stop(ctx: AppContext, force: bool) -> AppResult<CommandOutput> {
         }
         Err(err) => Err(err),
     }
+}
+
+async fn run_ble(ctx: AppContext, command: BleCommands) -> AppResult<CommandOutput> {
+    match command {
+        BleCommands::Config {
+            name,
+            service_uuid,
+            mode_char_uuid,
+            reset,
+        } => run_ble_config(ctx, name, service_uuid, mode_char_uuid, reset).await,
+        BleCommands::Scan { duration } => run_ble_scan(ctx, duration).await,
+        BleCommands::Test { mode } => run_ble_test(ctx, mode).await,
+    }
+}
+
+async fn run_ble_config(
+    ctx: AppContext,
+    name: Option<String>,
+    service_uuid: Option<String>,
+    mode_char_uuid: Option<String>,
+    reset: bool,
+) -> AppResult<CommandOutput> {
+    let has_update = reset || name.is_some() || service_uuid.is_some() || mode_char_uuid.is_some();
+    let config = if reset {
+        BleDeviceConfig::default()
+    } else {
+        ctx.runtime
+            .read_ble_config()?
+            .with_updates(name, service_uuid, mode_char_uuid)?
+    };
+
+    if has_update {
+        ctx.runtime.write_ble_config(&config)?;
+    }
+
+    Ok(CommandOutput::Json(json!({
+        "ok": true,
+        "updated": has_update,
+        "config_path": ctx.runtime.ble_config_path(),
+        "config": config,
+    })))
+}
+
+async fn run_ble_scan(ctx: AppContext, duration: u64) -> AppResult<CommandOutput> {
+    let duration = validate_ble_scan_duration(duration)?;
+    let config = ctx.runtime.read_ble_config()?;
+    let devices =
+        adapters::device::btleplug_ble::BtleplugBleAdapter::scan_nearby(&config, duration).await?;
+    Ok(CommandOutput::Json(json!({
+        "ok": true,
+        "duration_secs": duration.as_secs(),
+        "config": config,
+        "count": devices.len(),
+        "devices": devices,
+    })))
+}
+
+async fn run_ble_test(ctx: AppContext, mode: Option<Mode>) -> AppResult<CommandOutput> {
+    let config = ctx.runtime.read_ble_config()?;
+    let mut device =
+        adapters::device::btleplug_ble::BtleplugBleAdapter::with_config(config.clone());
+    let info = device.connect().await?;
+    if let Some(mode) = mode {
+        device.write_mode(mode).await?;
+    }
+    let health = device.health().await;
+    device.disconnect().await?;
+
+    Ok(CommandOutput::Json(json!({
+        "ok": true,
+        "config": config,
+        "device": info,
+        "tested_mode": mode,
+        "health_before_disconnect": health,
+    })))
+}
+
+fn validate_ble_scan_duration(duration: u64) -> AppResult<Duration> {
+    if !(1..=60).contains(&duration) {
+        return Err(AppError::new(
+            "invalid_ble_scan_duration",
+            "scan duration must be between 1 and 60 seconds",
+        ));
+    }
+    Ok(Duration::from_secs(duration))
 }
 
 async fn run_install(

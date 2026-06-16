@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use crate::model::{AppResult, InstallManifest, InstallManifestIndex, IpcInfo};
+use crate::model::{AppResult, BleDeviceConfig, InstallManifest, InstallManifestIndex, IpcInfo};
 
 /// RuntimeStore 把 pid/socket/log/manifest 等运行态文件集中管理，
 /// 这样 daemon 和 command 层都不需要散落拼路径。
@@ -27,6 +27,8 @@ pub trait RuntimeStore: Send + Sync {
     fn install_manifest_path(&self, target: &str) -> PathBuf;
     /// 平台默认 IPC 地址或路径。
     fn default_ipc_path(&self) -> PathBuf;
+    /// BLE 设备配置文件路径。
+    fn ble_config_path(&self) -> PathBuf;
     /// 确保 runtime 所需目录存在。
     fn ensure_layout(&self) -> AppResult<()>;
     /// 读取 daemon pid 文件。
@@ -51,4 +53,8 @@ pub trait RuntimeStore: Send + Sync {
     fn remove_install_manifest(&self, target: &str, config_path: &str) -> AppResult<()>;
     /// 读取指定 target 的安装摘要。
     fn read_install_manifest(&self, target: &str) -> AppResult<Option<InstallManifestIndex>>;
+    /// 读取 BLE 设备配置；未配置时返回默认配置。
+    fn read_ble_config(&self) -> AppResult<BleDeviceConfig>;
+    /// 写入 BLE 设备配置。
+    fn write_ble_config(&self, config: &BleDeviceConfig) -> AppResult<()>;
 }

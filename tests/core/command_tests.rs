@@ -49,3 +49,15 @@ fn cargo_run_hook_command_wraps_send_args() {
         ]
     );
 }
+
+#[test]
+fn ble_scan_duration_must_be_in_supported_range() {
+    assert!(validate_ble_scan_duration(1).is_ok());
+    assert!(validate_ble_scan_duration(60).is_ok());
+
+    let err = validate_ble_scan_duration(0).expect_err("zero duration should be rejected");
+    assert_eq!(err.code, "invalid_ble_scan_duration");
+
+    let err = validate_ble_scan_duration(61).expect_err("long duration should be rejected");
+    assert_eq!(err.code, "invalid_ble_scan_duration");
+}

@@ -68,6 +68,14 @@ const UNINSTALL_AFTER_HELP: &str = "\
   esp uninstall codex
   esp uninstall cursor --dir /path/to/project
   esp uninstall claude --dir .";
+const BLE_AFTER_HELP: &str = "\
+示例:
+  esp ble config
+  esp ble config --name AgentStatusLight --service-uuid b8b7e001-7a6b-4f4f-9a8b-11c0ffee0001 --mode-char-uuid b8b7e002-7a6b-4f4f-9a8b-11c0ffee0001
+  esp ble scan
+  esp ble scan --duration 10
+  esp ble test
+  esp ble test --mode green";
 
 /// CLI 只表达用户意图，不放业务规则。
 /// 具体逻辑在 `command.rs` 中完成。
@@ -224,6 +232,22 @@ daemon 负责维护 IPC 服务、管理状态路由、持有 BLE 设备连接，
         #[arg(long)]
         force: bool,
     },
+    /// 配置、扫描与测试 BLE 设备。
+    #[command(
+        about = "配置、扫描与测试 BLE 设备",
+        long_about = "\
+管理 AgentStatusLight 使用的 BLE 设备配置，并直接排查蓝牙链路。
+
+`config` 会读写 runtime 中的 BLE 配置；daemon、scan 和 test 都共享同一份配置。
+`scan` 用当前配置标记匹配到的设备，便于确认名称或服务 UUID 是否正确。
+`test` 会独立连接设备，不依赖 daemon 在线。",
+        after_help = BLE_AFTER_HELP
+    )]
+    Ble {
+        /// BLE 子命令。
+        #[command(subcommand)]
+        command: BleCommands,
+    },
     /// 为指定 Agent 安装 Hook。
     #[command(
         about = "为指定 Agent 安装 Hook",
@@ -260,6 +284,49 @@ daemon 负责维护 IPC 服务、管理状态路由、持有 BLE 设备连接，
         target: String,
         #[arg(long, help = "项目目录；传入后卸载项目级 Hook，不传则卸载全局配置")]
         dir: Option<PathBuf>,
+    },
+}
+
+/// BLE 设备管理子命令。
+#[derive(Debug, Subcommand)]
+pub enum BleCommands {
+    /// 查看或更新 BLE 设备配置。
+    #[command(
+        alias = "configure",
+        about = "查看或更新 BLE 设备配置",
+        long_about = "\
+查看或更新 BLE 设备配置。
+
+不传任何参数时只输出当前配置；传入任一参数时会保存更新后的配置。
+设备名用于按广播名称匹配，服务 UUID 用于按 GATT 服务匹配，mode 特征 UUID 用于写入灯效模式。"
+    )]
+    Config {
+        /// 目标 BLE 设备广播名。
+        #[arg(long, alias = "device-name", help = "目标 BLE 设备广播名")]
+        name: Option<String>,
+        /// 固件暴露的 GATT 服务 UUID。
+        #[arg(long, help = "固件暴露的 GATT 服务 UUID")]
+        service_uuid: Option<String>,
+        /// 固件暴露的 mode 特征 UUID。
+        #[arg(long, help = "固件暴露的 mode 特征 UUID")]
+        mode_char_uuid: Option<String>,
+        /// 重置为默认 BLE 配置。
+        #[arg(long, help = "重置为默认 BLE 配置")]
+        reset: bool,
+    },
+    /// 扫描附近 BLE 设备。
+    #[command(about = "扫描附近 BLE 设备")]
+    Scan {
+        /// 扫描时长，单位秒。
+        #[arg(long, default_value_t = 6, help = "扫描时长，单位秒")]
+        duration: u64,
+    },
+    /// 独立测试 BLE 连接。
+    #[command(about = "独立测试 BLE 连接")]
+    Test {
+        /// 连接成功后可选写入一个测试模式。
+        #[arg(long, help = "连接成功后可选写入一个测试模式，例如 green / off")]
+        mode: Option<Mode>,
     },
 }
 

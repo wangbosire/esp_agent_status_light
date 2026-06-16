@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use btleplug::api::{
     Central, Characteristic, Manager as _, Peripheral as _, ScanFilter, WriteType,
@@ -7,7 +9,9 @@ use chrono::Utc;
 use tokio::time::{Duration, Instant, sleep};
 use uuid::Uuid;
 
-use crate::model::{AppError, AppResult, DeviceHealth, DeviceInfo, Mode};
+use crate::model::{
+    AppError, AppResult, BleDeviceConfig, BleScanEntry, DeviceHealth, DeviceInfo, Mode,
+};
 use crate::ports::device::LightDevice;
 
 const BLE_SCAN_WINDOW: Duration = Duration::from_secs(6);
@@ -38,16 +42,96 @@ pub struct BtleplugBleAdapter {
 
 impl Default for BtleplugBleAdapter {
     fn default() -> Self {
+        Self::with_config(BleDeviceConfig::default())
+    }
+}
+
+impl BtleplugBleAdapter {
+    /// 使用 runtime 中保存的 BLE 配置创建适配器。
+    pub fn with_config(config: BleDeviceConfig) -> Self {
         Self {
-            // UUID 必须与固件中的 GATT 服务保持严格一致。
-            // 这里用 `from_u128` 直接构造，避免在默认构造路径里引入 fallible parse。
-            device_name: "AgentStatusLight".into(),
-            service_uuid: Uuid::from_u128(0xb8b7e0017a6b4f4f9a8b11c0ffee0001),
-            mode_char_uuid: Uuid::from_u128(0xb8b7e0027a6b4f4f9a8b11c0ffee0001),
+            device_name: config.device_name,
+            service_uuid: config.service_uuid,
+            mode_char_uuid: config.mode_char_uuid,
             peripheral: None,
             characteristic: None,
             health: DeviceHealth::default(),
         }
+    }
+
+    /// 扫描附近 BLE 设备，供 `esp ble scan` 直接调用。
+    pub async fn scan_nearby(
+        config: &BleDeviceConfig,
+        scan_window: Duration,
+    ) -> AppResult<Vec<BleScanEntry>> {
+        let manager = Manager::new()
+            .await
+            .map_err(|err| AppError::new("ble_manager_init_failed", err.to_string()))?;
+        let adapters = manager
+            .adapters()
+            .await
+            .map_err(|err| AppError::new("ble_adapter_list_failed", err.to_string()))?;
+        let adapter = adapters.into_iter().next().ok_or_else(|| {
+            AppError::new("ble_adapter_missing", "no bluetooth adapter available")
+        })?;
+
+        adapter
+            .start_scan(ScanFilter::default())
+            .await
+            .map_err(|err| AppError::new("ble_scan_failed", err.to_string()))?;
+
+        let scan_started = Instant::now();
+        let mut found = HashMap::<String, BleScanEntry>::new();
+        while scan_started.elapsed() < scan_window {
+            sleep(BLE_SCAN_POLL_INTERVAL).await;
+            let peripherals = adapter
+                .peripherals()
+                .await
+                .map_err(|err| AppError::new("ble_peripheral_list_failed", err.to_string()))?;
+
+            for peripheral in peripherals {
+                let Ok(properties) = peripheral.properties().await else {
+                    continue;
+                };
+                let Some(properties) = properties else {
+                    continue;
+                };
+
+                let id = format!("{:?}", peripheral.id());
+                let name_matches = properties
+                    .local_name
+                    .as_deref()
+                    .is_some_and(|name| name == config.device_name);
+                let service_matches = properties.services.contains(&config.service_uuid);
+                found.insert(
+                    id.clone(),
+                    BleScanEntry {
+                        id,
+                        name: properties.local_name,
+                        rssi: properties.rssi,
+                        services: properties.services,
+                        matches_config: name_matches || service_matches,
+                    },
+                );
+            }
+        }
+
+        let _ = adapter.stop_scan().await;
+
+        let mut entries = found.into_values().collect::<Vec<_>>();
+        entries.sort_by(|left, right| {
+            right
+                .matches_config
+                .cmp(&left.matches_config)
+                .then_with(|| {
+                    right
+                        .rssi
+                        .unwrap_or(i16::MIN)
+                        .cmp(&left.rssi.unwrap_or(i16::MIN))
+                })
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        Ok(entries)
     }
 }
 

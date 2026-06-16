@@ -390,6 +390,89 @@ pub struct DeviceInfo {
     pub id: String,
 }
 
+fn default_ble_device_name() -> String {
+    "AgentStatusLight".into()
+}
+
+fn default_ble_service_uuid() -> Uuid {
+    Uuid::from_u128(0xb8b7e0017a6b4f4f9a8b11c0ffee0001)
+}
+
+fn default_ble_mode_char_uuid() -> Uuid {
+    Uuid::from_u128(0xb8b7e0027a6b4f4f9a8b11c0ffee0001)
+}
+
+/// BLE 设备配置。
+///
+/// daemon、连接测试和扫描命令共用这份配置，避免“命令测得通，daemon 却连旧设备”的分裂。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BleDeviceConfig {
+    /// 目标 BLE 设备名称。
+    #[serde(default = "default_ble_device_name")]
+    pub device_name: String,
+    /// 固件暴露的 GATT 服务 UUID。
+    #[serde(default = "default_ble_service_uuid")]
+    pub service_uuid: Uuid,
+    /// 固件暴露的 mode 特征 UUID。
+    #[serde(default = "default_ble_mode_char_uuid")]
+    pub mode_char_uuid: Uuid,
+}
+
+impl Default for BleDeviceConfig {
+    fn default() -> Self {
+        Self {
+            device_name: default_ble_device_name(),
+            service_uuid: default_ble_service_uuid(),
+            mode_char_uuid: default_ble_mode_char_uuid(),
+        }
+    }
+}
+
+impl BleDeviceConfig {
+    /// 应用命令行传入的局部更新，并做基础输入校验。
+    pub fn with_updates(
+        mut self,
+        device_name: Option<String>,
+        service_uuid: Option<String>,
+        mode_char_uuid: Option<String>,
+    ) -> AppResult<Self> {
+        if let Some(name) = device_name {
+            let name = name.trim();
+            if name.is_empty() {
+                return Err(AppError::new(
+                    "invalid_ble_config",
+                    "device name must not be empty",
+                ));
+            }
+            self.device_name = name.into();
+        }
+        if let Some(value) = service_uuid {
+            self.service_uuid = Uuid::parse_str(value.trim())
+                .map_err(|err| AppError::invalid("parse service uuid", err))?;
+        }
+        if let Some(value) = mode_char_uuid {
+            self.mode_char_uuid = Uuid::parse_str(value.trim())
+                .map_err(|err| AppError::invalid("parse mode characteristic uuid", err))?;
+        }
+        Ok(self)
+    }
+}
+
+/// `esp ble scan` 输出的附近设备摘要。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BleScanEntry {
+    /// 平台返回的 peripheral id。
+    pub id: String,
+    /// 广播名，部分设备可能为空。
+    pub name: Option<String>,
+    /// 信号强度。
+    pub rssi: Option<i16>,
+    /// 广播中携带的服务 UUID。
+    pub services: Vec<Uuid>,
+    /// 是否匹配当前配置的设备名或服务 UUID。
+    pub matches_config: bool,
+}
+
 /// `status --verbose` 中用于展示 BLE 连接健康度的快照。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DeviceHealth {

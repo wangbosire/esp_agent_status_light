@@ -6,7 +6,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::model::{AppError, AppResult, InstallManifest, InstallManifestIndex, IpcInfo};
+use crate::model::{
+    AppError, AppResult, BleDeviceConfig, InstallManifest, InstallManifestIndex, IpcInfo,
+};
 use crate::ports::runtime::RuntimeStore;
 
 #[derive(Debug, Clone)]
@@ -78,6 +80,10 @@ impl RuntimeStore for FsRuntimeAdapter {
 
     fn default_ipc_path(&self) -> PathBuf {
         self.runtime_dir().join("daemon.sock")
+    }
+
+    fn ble_config_path(&self) -> PathBuf {
+        self.root.join("ble.json")
     }
 
     fn ensure_layout(&self) -> AppResult<()> {
@@ -197,6 +203,22 @@ impl RuntimeStore for FsRuntimeAdapter {
         let raw =
             fs::read_to_string(path).map_err(|err| AppError::io("read install manifest", err))?;
         parse_install_manifest_index(target, &raw).map(Some)
+    }
+
+    fn read_ble_config(&self) -> AppResult<BleDeviceConfig> {
+        let path = self.ble_config_path();
+        if !path.exists() {
+            return Ok(BleDeviceConfig::default());
+        }
+        let raw = fs::read_to_string(path).map_err(|err| AppError::io("read ble config", err))?;
+        serde_json::from_str(&raw).map_err(|err| AppError::invalid("parse ble config", err))
+    }
+
+    fn write_ble_config(&self, config: &BleDeviceConfig) -> AppResult<()> {
+        self.ensure_layout()?;
+        let raw = serde_json::to_string_pretty(config)
+            .map_err(|err| AppError::invalid("serialize ble config", err))?;
+        self.write_atomic(self.ble_config_path(), raw, "ble config")
     }
 }
 
